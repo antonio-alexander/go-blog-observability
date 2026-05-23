@@ -1,0 +1,114 @@
+services:
+  mysql:
+    container_name: "mysql"
+    hostname: "mysql"
+    image: yobasystems/alpine-mariadb:latest
+    restart: "always"
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-mysql}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-go_blog_observability}
+      MYSQL_USER: ${MYSQL_USER:-mysql}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-mysql}
+    volumes:
+      - ./sql:/tmp/test_db
+      - ./cmd/mysql/001_load_employees.sh:/docker-entrypoint-initdb.d/001_load_employees.sh
+
+  redis:
+    container_name: "redis"
+    hostname: "redis"
+    image: redis:7.0.12-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --save 20 1 --loglevel warning
+
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    container_name: otel-lgtm
+    ports:
+      - "3000:3000" # Grafana UI
+      - "4317:4317" # OTLP gRPC receiver
+      - "4318:4318" # OTLP HTTP receiver
+    volumes:
+      - otel-lgtm-data:/data
+    healthcheck:
+      test: ["CMD", "/opt/health-check.sh"]
+      interval: 1m
+      timeout: 10s
+      retries: 10
+    environment:
+      OTEL_EXPORTER_OTLP_INSECURE: true
+
+  service:
+    container_name: service
+    hostname: service
+    image: ghcr.io/antonio-alexander/go-blog-observability/service:latest
+    profiles: ["service"]
+    depends_on:
+      redis:
+        condition: service_started
+      mysql:
+        condition: service_started
+    ports:
+      - "8081:8080"
+    build:
+      context: ./
+      dockerfile: ./cmd/service/Dockerfile
+      args:
+        PLATFORM: ${PLATFORM:-linux/amd64}
+        GO_ARCH: ${GO_ARCH:-amd64}
+        GO_ARM: ${GO_ARM:-7}
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      TRACE_ENABLE_STDOUT: ${TRACE_ENABLE_STDOUT:-false}
+      METRICS_ENABLE_STDOUT: ${METRICS_ENABLE_STDOUT:-false}
+      DATABASE_HOST: ${DATABASE_HOST:-mysql}
+      DATABASE_PORT: ${DATABASE_PORT:-3306}
+      DATABASE_NAME: ${DATABASE_NAME:-employees}
+      DATABASE_USER: ${DATABASE_USER:-mysql}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-mysql}
+      DATABASE_QUERY_TIMEOUT: ${DATABASE_QUERY_TIMEOUT:-10}
+      DATABASE_PARSE_TIME: ${DATABASE_PARSE_TIME:-true}
+      SERVICE_ADDRESS: ${SERVICE_ADDRESS}
+      SERVICE_PORT: ${SERVICE_PORT:-8080}
+      SERVICE_PROTOCOL: ${SERVICE_PROTOCOL:-http}
+      SERVICE_TIMEOUT: ${SERVICE_TIMEOUT}
+      SERVICE_CORS_DISABLED: ${SERVICE_CORS_DISABLED}
+      SERVICE_CORS_ALLOWED_ORIGINS: ${SERVICE_CORS_ALLOWED_ORIGINS:-*}
+      SERVICE_CORS_ALLOWED_METHODS: ${SERVICE_CORS_ALLOWED_METHODS:-POST,PUT,GET,DELETE,PATCH}
+      SERVICE_CORS_ALLOWED_HEADERS: ${SERVICE_CORS_ALLOWED_HEADERS:-Correlation-Id,Authorization}
+      SSL_CA_FILE: ${SSL_CA_FILE}
+      SSL_KEY_FILE: ${SSL_KEY_FILE}
+      SSL_CRT_FILE: ${SSL_CRT_FILE}
+      REDIS_ADDRESS: ${REDIS_ADDRESS:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DATABASE: ${REDIS_DATABASE}
+      REDIS_HASH_KEY: ${REDIS_HASH_KEY}
+      REDIS_TIMEOUT: ${REDIS_TIMEOUT:-10}
+      MUTATE_DISABLED: ${MUTATE_DISABLED}
+      LOGIC_CACHE_ENABLED: ${LOGIC_CACHE_ENABLED:-true}
+      CACHE_PRUNE_INTERVAL: ${CACHE_PRUNE_INTERVAL:-1}
+      CACHE_SET_READ_TTL: ${CACHE_SET_READ_TTL:-10}
+      CACHE_ENABLE_IN_PROGRESS: ${CACHE_ENABLE_IN_PROGRESS:-true}
+      CACHE_RETRY_INTERVAL: ${CACHE_RETRY_INTERVAL:-1}
+      CACHE_MAX_RETRIES: ${CACHE_MAX_RETRIES:-2}
+      CACHE_RETRY_EXP_BACKOFF: ${CACHE_RETRY_EXP_BACKOFF:-true}
+      CACHE_NOT_FOUND_PRUNE_INTERVAL: ${CACHE_NOT_FOUND_PRUNE_INTERVAL:-10}
+      CACHE_NOT_FOUND_TTL: ${CACHE_NOT_FOUND_TTL:-5}
+      CACHE_NOT_FOUND_ENABLED: ${CACHE_NOT_FOUND_ENABLED}
+      CACHE_TTL: ${CACHE_TTL}
+      AUTHZ_POLICY_COMPILE_INPUT_FILE: ${AUTHZ_POLICY_COMPILE_INPUT_FILE:-./data/policy_data.json}
+      AUTHZ_DISABLED: ${AUTHZ_DISABLED}
+      AUTHZ_PUBLIC_SIGNING_METHOD: ${AUTHZ_PUBLIC_SIGNING_METHOD:-HS256}
+      AUTHZ_PUBLIC_SIGNING_KEY: ${AUTHZ_PUBLIC_SIGNING_KEY:-secret}
+      AUTHZ_PUBLIC_SIGNING_KEY_FILE: ${AUTHZ_PUBLIC_SIGNING_KEY_FILE}
+      AUTHZ_USER_ID: ${AUTHZ_USER_ID}
+      REGO_COMPILE_FILENAME: ${REGO_COMPILE_FILENAME:-./opa/compilation}
+      EVAL_COMPILE_FILENAME: ${EVAL_COMPILE_FILENAME:-./opa/evaluation}
+      OTEL_PROTOCOL: ${OTEL_PROTOCOL:-http}
+      OTEL_HOST: ${OTEL_HOST:-otel-lgtm:4318}
+volumes:
+  otel-lgtm-data:

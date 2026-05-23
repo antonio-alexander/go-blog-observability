@@ -1,0 +1,7 @@
+{
+  "opa.bundleMode": true,
+  "opa.roots": ["${workspaceFolder}/opa"],
+  "opa.formatter": "opa-fmt",
+  "go.testFlags": ["-count=1", "-v"],
+  "go.testTimeout": "30m"
+}

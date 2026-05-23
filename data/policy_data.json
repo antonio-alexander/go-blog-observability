@@ -1,0 +1,14 @@
+{
+  "roles": {
+    "employee_admin": {
+      "name": "employee_admin",
+      "userIds": ["14f3d416-6739-4b7f-94c0-74d50d6aa61f"],
+      "permissions": [
+        "employee_create",
+        "employee_read",
+        "employee_update",
+        "employee_delete"
+      ]
+    }
+  }
+}

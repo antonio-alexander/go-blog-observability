@@ -1,0 +1,29 @@
+rules:
+  style:
+    todo-comment: # Example of ignoring a default rule
+      level: ignore
+    line-length: # Example of customizing a default rule
+      max-line-length: 100
+      level: warning
+      # Files can be ignored for any individual rule
+      ignore:
+        files:
+          - "*_test.rego"
+    opa-fmt:
+      # Files can be ignored for any individual rule
+      ignore:
+        files:
+          - "*_test.rego"
+  imports:
+    unresolved-reference:
+      level: ignore # Use 'ignore' to disable entirely or 'warning' to just report without failing
+      config:
+        # List references or paths that should be considered resolved
+        # Use '*' as a wildcard to ignore all references under a certain path
+        resolved-references:
+          - "data.access.*"
+          - "data.roles"
+  testing:
+    print-or-trace-call:
+      # one of "error", "warning", "ignore"
+      level: ignore

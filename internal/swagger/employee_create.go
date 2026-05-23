@@ -1,0 +1,33 @@
+package swagger
+
+import "github.com/antonio-alexander/go-blog-observability/internal/data"
+
+// swagger:route PUT /employees Employee CreateEmployee
+// Creates an employee.
+//
+// Consumes:
+// - application/json
+//
+// Produces:
+// - application/json
+//
+// Security:
+//   BearerAuth:
+//
+// responses:
+//   200: EmployeePutResponseOk
+
+// swagger:response EmployeePutResponseOk
+type EmployeePutResponseOk struct {
+	// in:body
+	Employee data.Employee `json:"employee"`
+}
+
+// swagger:parameters CreateEmployee
+type EmployeePutParams struct {
+	// in:header
+	CorrelationId string `json:"Correlation-Id"`
+
+	// in:body
+	EmployeePartial data.EmployeePartial `json:"employee_partial"`
+}
