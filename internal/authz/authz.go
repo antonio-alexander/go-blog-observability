@@ -28,6 +28,10 @@ import (
 
 type authz struct {
 	sync.WaitGroup
+	logger.Logger
+	tracer.Tracer
+	metrics.Metrics
+	logic.Logic
 	config struct {
 		authorizationDisabled  bool
 		publicSigningKeyMethod string
@@ -37,10 +41,6 @@ type authz struct {
 		userId                 string
 		policyCompileInputFile string
 	}
-	logger.Logger
-	tracer.Tracer
-	metrics.Metrics
-	logic.Logic
 	policy                 policy.Policy
 	ctx                    context.Context
 	ctxCancel              context.CancelFunc
@@ -161,7 +161,7 @@ func (a *authz) launchCompile() {
 			}
 			//this ensures that we only get a trace when relevant work
 			// is actually being done
-			ctx, span := a.Start(ctx, "authz.launchCompile",
+			ctx, span := a.Start(ctx, "authz.launch_compile",
 				trace.WithNewRoot())
 			defer span.End()
 			compileOutput := &data.PolicyCompileOutput{}
@@ -291,13 +291,15 @@ func (a *authz) Close(ctx context.Context) {
 
 func (a *authz) EmployeeCreate(ctx context.Context, authorization string,
 	employeePartial data.EmployeePartial) (*data.Employee, error) {
-	ctx, span := a.Start(ctx, "authz.EmployeeCreate")
+	ctx, span := a.Start(ctx, "authz.employee_create")
 	defer span.End()
 	if !a.config.authorizationDisabled {
 		claims := &data.AuthzClaims{}
 		if _, err := jwt.ParseWithClaims(authorization, claims,
 			a.publicKeyFunc); err != nil {
-			return nil, errors.Wrap(err, ErrJwt)
+			err := errors.Wrap(err, ErrJwt)
+			span.RecordError(err)
+			return nil, err
 		}
 		hasAccess, err := a.evaluateBoolean(ctx, "data.opa.evaluation.can_create_employee",
 			data.PolicyEvaluationInput{
@@ -305,23 +307,33 @@ func (a *authz) EmployeeCreate(ctx context.Context, authorization string,
 				PolicyCompileOutput: a.compileOutput.Load(),
 			})
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		if !hasAccess {
-			return nil, ErrUnauthorized(claims.UserId, "create", "employee", nil)
+			err := ErrUnauthorized(claims.UserId, "create", "employee", nil)
+			span.RecordError(err)
+			return nil, err
 		}
 	}
-	return a.Logic.EmployeeCreate(ctx, employeePartial)
+	employee, err := a.Logic.EmployeeCreate(ctx, employeePartial)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (a *authz) EmployeeRead(ctx context.Context, authorization string, empNo int64) (*data.Employee, error) {
-	ctx, span := a.Start(ctx, "authz.EmployeeRead")
+	ctx, span := a.Start(ctx, "authz.employee_read")
 	defer span.End()
 	if !a.config.authorizationDisabled {
 		claims := &data.AuthzClaims{}
 		if _, err := jwt.ParseWithClaims(authorization, claims,
 			a.publicKeyFunc); err != nil {
-			return nil, errors.Wrap(err, ErrJwt)
+			err := errors.Wrap(err, ErrJwt)
+			span.RecordError(err)
+			return nil, err
 		}
 		hasAccess, err := a.evaluateBoolean(ctx, "data.opa.evaluation.can_create_employee",
 			data.PolicyEvaluationInput{
@@ -329,25 +341,35 @@ func (a *authz) EmployeeRead(ctx context.Context, authorization string, empNo in
 				PolicyCompileOutput: a.compileOutput.Load(),
 			})
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		if !hasAccess {
-			return nil, ErrUnauthorized(claims.UserId, "read",
+			err := ErrUnauthorized(claims.UserId, "read",
 				"employee", new(fmt.Sprint(empNo)))
+			span.RecordError(err)
+			return nil, err
 		}
 	}
-	return a.Logic.EmployeeRead(ctx, empNo)
+	employee, err := a.Logic.EmployeeRead(ctx, empNo)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (a *authz) EmployeesSearch(ctx context.Context, authorization string,
 	search data.EmployeeSearch) ([]*data.Employee, error) {
-	ctx, span := a.Start(ctx, "authz.EmployeesSearch")
+	ctx, span := a.Start(ctx, "authz.employee_search")
 	defer span.End()
 	if !a.config.authorizationDisabled {
 		claims := &data.AuthzClaims{}
 		if _, err := jwt.ParseWithClaims(authorization, claims,
 			a.publicKeyFunc); err != nil {
-			return nil, errors.Wrap(err, ErrJwt)
+			err := errors.Wrap(err, ErrJwt)
+			span.RecordError(err)
+			return nil, err
 		}
 		hasAccess, err := a.evaluateBoolean(ctx, "data.opa.evaluation.can_create_employee",
 			data.PolicyEvaluationInput{
@@ -355,25 +377,35 @@ func (a *authz) EmployeesSearch(ctx context.Context, authorization string,
 				PolicyCompileOutput: a.compileOutput.Load(),
 			})
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		if !hasAccess {
-			return nil, ErrUnauthorized(claims.UserId,
+			err := ErrUnauthorized(claims.UserId,
 				"employee_search", "employee", nil)
+			span.RecordError(err)
+			return nil, err
 		}
 	}
-	return a.Logic.EmployeesSearch(ctx, search)
+	employees, err := a.Logic.EmployeesSearch(ctx, search)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employees, nil
 }
 
 func (a *authz) EmployeeUpdate(ctx context.Context, authorization string, empNo int64,
 	employeePartial data.EmployeePartial) (*data.Employee, error) {
-	ctx, span := a.Start(ctx, "authz.EmployeeUpdate")
+	ctx, span := a.Start(ctx, "authz.employee_update")
 	defer span.End()
 	if !a.config.authorizationDisabled {
 		claims := &data.AuthzClaims{}
 		if _, err := jwt.ParseWithClaims(authorization, claims,
 			a.publicKeyFunc); err != nil {
-			return nil, errors.Wrap(err, ErrJwt)
+			err := errors.Wrap(err, ErrJwt)
+			span.RecordError(err)
+			return nil, err
 		}
 		hasAccess, err := a.evaluateBoolean(ctx, "data.opa.evaluation.can_create_employee",
 			data.PolicyEvaluationInput{
@@ -381,24 +413,34 @@ func (a *authz) EmployeeUpdate(ctx context.Context, authorization string, empNo 
 				PolicyCompileOutput: a.compileOutput.Load(),
 			})
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		if !hasAccess {
-			return nil, ErrUnauthorized(claims.UserId, "update",
+			err := ErrUnauthorized(claims.UserId, "update",
 				"employee", new(fmt.Sprint(empNo)))
+			span.RecordError(err)
+			return nil, err
 		}
 	}
-	return a.Logic.EmployeeUpdate(ctx, empNo, employeePartial)
+	employee, err := a.Logic.EmployeeUpdate(ctx, empNo, employeePartial)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (a *authz) EmployeeDelete(ctx context.Context, authorization string, empNo int64) error {
-	ctx, span := a.Start(ctx, "authz.EmployeeDelete")
+	ctx, span := a.Start(ctx, "authz.employee_delete")
 	defer span.End()
 	if !a.config.authorizationDisabled {
 		claims := &data.AuthzClaims{}
 		if _, err := jwt.ParseWithClaims(authorization, claims,
 			a.publicKeyFunc); err != nil {
-			return errors.Wrap(err, ErrJwt)
+			err := errors.Wrap(err, ErrJwt)
+			span.RecordError(err)
+			return err
 		}
 		hasAccess, err := a.evaluateBoolean(ctx, "data.opa.evaluation.can_create_employee",
 			data.PolicyEvaluationInput{
@@ -406,12 +448,19 @@ func (a *authz) EmployeeDelete(ctx context.Context, authorization string, empNo 
 				PolicyCompileOutput: a.compileOutput.Load(),
 			})
 		if err != nil {
+			span.RecordError(err)
 			return err
 		}
 		if !hasAccess {
-			return ErrUnauthorized(claims.UserId, "delete",
+			err := ErrUnauthorized(claims.UserId, "delete",
 				"employee", new(fmt.Sprint(empNo)))
+			span.RecordError(err)
+			return err
 		}
 	}
-	return a.Logic.EmployeeDelete(ctx, empNo)
+	if err := a.Logic.EmployeeDelete(ctx, empNo); err != nil {
+		span.RecordError(err)
+		return err
+	}
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/antonio-alexander/go-blog-observability/internal"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -36,5 +37,7 @@ func (m *tracerNull) Start(ctx context.Context, spanName string,
 
 type nullSpan struct{}
 
-func (n *nullSpan) End(options ...trace.SpanEndOption)     {}
-func (n *nullSpan) SetAttributes(kv ...attribute.KeyValue) {}
+func (n *nullSpan) End(options ...trace.SpanEndOption)                  {}
+func (n *nullSpan) SetAttributes(kv ...attribute.KeyValue)              {}
+func (n *nullSpan) RecordError(err error, options ...trace.EventOption) {}
+func (n *nullSpan) SetStatus(code codes.Code, description string)       {}

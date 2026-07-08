@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antonio-alexander/go-blog-observability/internal/authz"
 	pkgcontext "github.com/antonio-alexander/go-blog-observability/internal/pkg/context"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/policy"
@@ -111,7 +110,9 @@ func doRequest(ctx context.Context, c *http.Client, method, uri, authorization s
 	if err != nil {
 		return nil, 0, err
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 	switch response.StatusCode {
 	default:
 		var e struct {
@@ -123,8 +124,8 @@ func doRequest(ctx context.Context, c *http.Client, method, uri, authorization s
 			switch e.ErrorType {
 			default:
 				err = errors.ErrorCommon{}
-			case authz.ErrorTypeUnauthorized:
-				err = authz.ErrorUnauthorized{}
+			case errors.ErrorTypeUnauthorized:
+				err = errors.ErrorUnauthorized{}
 			case policy.ErrorTypeRego:
 				err = policy.ErrorRego{}
 

@@ -13,6 +13,7 @@ import (
 	"github.com/antonio-alexander/go-blog-observability/internal/data"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/logger"
+	"github.com/antonio-alexander/go-blog-observability/internal/pkg/tracer"
 
 	"github.com/XSAM/otelsql"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
@@ -23,6 +24,8 @@ import (
 const tableEmployees = "employees"
 
 type mySql struct {
+	logger.Logger
+	tracer.Tracer
 	config struct {
 		Hostname       string        `json:"hostname"`
 		Port           string        `json:"port"`
@@ -34,7 +37,6 @@ type mySql struct {
 		ParseTime      bool          `json:"parse_time"`
 	}
 	*sql.DB
-	logger.Logger
 	opened atomic.Bool
 }
 
@@ -48,6 +50,8 @@ func New(parameters ...any) interface {
 		switch v := parameter.(type) {
 		case logger.Logger:
 			m.Logger = v
+		case tracer.Tracer:
+			m.Tracer = v
 		}
 	}
 	return m
@@ -113,6 +117,8 @@ func (s *mySql) EmployeeCreate(ctx context.Context, employeePartial data.Employe
 	var columns, values []string
 	var args []any
 
+	ctx, span := s.Start(ctx, "sql.employee_create")
+	defer span.End()
 	if employeePartial.BirthDate != nil {
 		args = append(args, time.Unix(*employeePartial.BirthDate, 0))
 		columns = append(columns, "birth_date")
@@ -140,6 +146,7 @@ func (s *mySql) EmployeeCreate(ctx context.Context, employeePartial data.Employe
 	}
 	empNo, err := findEmpNo(ctx, s.DB)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	args = append(args, empNo)
@@ -148,12 +155,20 @@ func (s *mySql) EmployeeCreate(ctx context.Context, employeePartial data.Employe
 	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableEmployees,
 		strings.Join(columns, ","), strings.Join(values, ","))
 	if _, err := s.ExecContext(ctx, query, args...); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
-	return s.EmployeeRead(ctx, empNo)
+	employee, err := s.EmployeeRead(ctx, empNo)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (s *mySql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
+	ctx, span := s.Start(ctx, "sql.employee_read")
+	defer span.End()
 	query := fmt.Sprintf(`SELECT emp_no, birth_date, first_name, last_name,
 		gender, hire_date FROM %s WHERE emp_no = ?;`,
 		tableEmployees)
@@ -164,7 +179,9 @@ func (s *mySql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 		default:
 			return nil, err
 		case errors.Is(err, sql.ErrNoRows):
-			return nil, ErrEmployeeNotFound(err, empNo)
+			err := ErrEmployeeNotFound(err, empNo)
+			span.RecordError(err)
+			return nil, err
 		}
 	}
 	return employee, nil
@@ -173,22 +190,27 @@ func (s *mySql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 func (s *mySql) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
 	var employees []*data.Employee
 
+	ctx, span := s.Start(ctx, "sql.employee_search")
+	defer span.End()
 	criteria, args := employeeCriteria(search)
 	query := fmt.Sprintf(`SELECT emp_no, birth_date, first_name, last_name,
 		gender, hire_date FROM %s %s;`,
 		tableEmployees, criteria)
 	rows, err := s.QueryContext(ctx, query, args...)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	for rows.Next() {
 		employee, err := employeeScan(rows.Scan)
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		employees = append(employees, employee)
 	}
 	if len(employees) <= 0 {
+		span.RecordError(ErrEmployeeSearchNotFound)
 		return nil, ErrEmployeeSearchNotFound
 	}
 	return employees, nil
@@ -198,6 +220,8 @@ func (s *mySql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial
 	var args []any
 	var updates []string
 
+	ctx, span := s.Start(ctx, "sql.employee_update")
+	defer span.End()
 	if employeePartial.BirthDate != nil {
 		args = append(args, time.Unix(*employeePartial.BirthDate, 0))
 		updates = append(updates, "birth_date = ?")
@@ -222,33 +246,48 @@ func (s *mySql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial
 		strings.Join(updates, ","))
 	args = append(args, empNo)
 	if _, err := s.ExecContext(ctx, query, args...); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
-	return s.EmployeeRead(ctx, empNo)
+	employee, err := s.EmployeeRead(ctx, empNo)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (s *mySql) EmployeeDelete(ctx context.Context, empNo int64) error {
+	ctx, span := s.Start(ctx, "sql.employee_delete")
+	defer span.End()
 	query := fmt.Sprintf(`DELETE FROM %s WHERE emp_no = ?;`,
 		tableEmployees)
 	result, err := s.ExecContext(ctx, query, empNo)
 	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if n == 0 {
-		return ErrEmployeeNotFound(nil, empNo)
+		err := ErrEmployeeNotFound(nil, empNo)
+		span.RecordError(err)
+		return err
 	}
 	return nil
 }
 
 func (s *mySql) Sleep(ctx context.Context, sleep data.Sleep) (*data.Sleep, error) {
+	ctx, span := s.Start(ctx, "sql.sleep")
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, s.config.QueryTimeout)
 	defer cancel()
 	query := "DO SLEEP(?);"
 	if _, err := s.ExecContext(ctx, query, sleep.Duration); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return &sleep, nil

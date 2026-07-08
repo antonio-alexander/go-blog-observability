@@ -80,7 +80,7 @@ func ErrEmployeeNotFoundCached(empNo int64) error {
 func ErrEmployeeReadSet(empNo int64) error {
 	return errors.ErrorCommon{
 		ErrorMessage: errEmployeeReadSet,
-		ErrorType:    errors.ErrorTypeNotCachedRetry,
+		ErrorType:    errors.ErrorTypeNotCachedInProgressSet,
 		DataId:       new(fmt.Sprint(empNo)),
 		DataType:     new("employee"),
 	}
@@ -116,7 +116,7 @@ func ErrSleepNotFoundCached(sleepId string) error {
 func ErrSleepReadSet(sleepId string) error {
 	return errors.ErrorCommon{
 		ErrorMessage: errSleepReadSet,
-		ErrorType:    errors.ErrorTypeNotCachedRetry,
+		ErrorType:    errors.ErrorTypeNotCachedInProgressSet,
 		DataId:       new(sleepId),
 		DataType:     new("sleep"),
 	}

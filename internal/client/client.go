@@ -14,10 +14,13 @@ import (
 	"github.com/antonio-alexander/go-blog-observability/internal"
 	"github.com/antonio-alexander/go-blog-observability/internal/data"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/logger"
+	"github.com/antonio-alexander/go-blog-observability/internal/pkg/tracer"
 )
 
 type client struct {
 	sync.RWMutex
+	logger.Logger
+	tracer.Tracer
 	config struct {
 		protocol   string
 		address    string
@@ -32,7 +35,6 @@ type client struct {
 	ctx       context.Context
 	ctxCancel context.CancelFunc
 	opened    bool
-	logger.Logger
 	*http.Client
 }
 
@@ -128,13 +130,13 @@ func (c *client) Open(ctx context.Context) error {
 		c.address = fmt.Sprintf("%s://%s", c.config.protocol,
 			net.JoinHostPort(c.config.address, c.config.port))
 	}
-	c.Client.Timeout = time.Duration(c.config.timeout) * time.Second
+	c.Timeout = time.Duration(c.config.timeout) * time.Second
 	tlsConfig, err := getTlsConfig(c.config.sslCaFile, c.config.sslCrtFile,
 		c.config.sslKeyFile)
 	if err != nil {
 		return err
 	}
-	c.Client.Transport = tlsConfig
+	c.Transport = tlsConfig
 	c.ctx, c.ctxCancel = context.WithCancel(context.Background())
 	c.opened = true
 	return nil
@@ -152,31 +154,40 @@ func (c *client) Close(ctx context.Context) {
 }
 
 func (c *client) EmployeeCreate(ctx context.Context, token string, employeePartial data.EmployeePartial) (*data.Employee, error) {
+	ctx, span := c.Start(ctx, "client.employee_create")
+	defer span.End()
 	bytes, err := json.Marshal(&data.Request{
 		EmployeePartial: employeePartial})
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	uri := c.address + data.RouteEmployees
 	bytes, err = c.doRequest(ctx, http.MethodPut, uri, token, bytes)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	response := &data.Response{}
 	if err := json.Unmarshal(bytes, response); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return response.Employee, nil
 }
 
 func (c *client) EmployeeRead(ctx context.Context, token string, empNo int64) (*data.Employee, error) {
+	ctx, span := c.Start(ctx, "client.employee_read")
+	defer span.End()
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
 	bytes, err := c.doRequest(ctx, http.MethodGet, uri, token, nil)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	response := &data.Response{}
 	if err := json.Unmarshal(bytes, response); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return response.Employee, nil
@@ -185,71 +196,94 @@ func (c *client) EmployeeRead(ctx context.Context, token string, empNo int64) (*
 func (c *client) EmployeesSearch(ctx context.Context, token string, search data.EmployeeSearch) ([]*data.Employee, error) {
 	var response data.Response
 
+	ctx, span := c.Start(ctx, "client.employees_search")
+	defer span.End()
 	params := search.ToParams()
 	uri := c.address + data.RouteEmployeesSearch
 	bytes, err := c.doRequest(ctx, http.MethodGet, uri, token, params)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	if err := json.Unmarshal(bytes, &response); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return response.Employees, nil
 }
 
 func (c *client) EmployeeUpdate(ctx context.Context, token string, empNo int64, employeePartial data.EmployeePartial) (*data.Employee, error) {
+	ctx, span := c.Start(ctx, "client.employee_update")
+	defer span.End()
 	bytes, err := json.Marshal(&data.Request{EmployeePartial: employeePartial})
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
 	bytes, err = c.doRequest(ctx, http.MethodPost, uri, token, bytes)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	response := &data.Response{}
 	if err := json.Unmarshal(bytes, response); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return response.Employee, nil
 }
 
 func (c *client) EmployeeDelete(ctx context.Context, token string, empNo int64) error {
+	ctx, span := c.Start(ctx, "client.employee_delete")
+	defer span.End()
 	uri := fmt.Sprintf(c.address+data.RouteEmployeesEmpNof, empNo)
 	if _, err := c.doRequest(ctx, http.MethodDelete, uri, token, nil); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	return nil
 }
 
 func (c *client) Sleep(ctx context.Context, s data.Sleep) (*data.Sleep, error) {
+	ctx, span := c.Start(ctx, "client.sleep")
+	defer span.End()
 	uri := c.address + data.RouteSleep
 	bytes, err := json.Marshal(&s)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	bytes, err = c.doRequest(ctx, http.MethodPost, uri, "", bytes)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	sleep := &data.Sleep{}
 	if err := json.Unmarshal(bytes, sleep); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return sleep, nil
 }
 
 func (c *client) CacheClear(ctx context.Context) error {
+	ctx, span := c.Start(ctx, "client.cache_clear")
+	defer span.End()
 	uri := c.address + data.RouteCache
 	if _, err := c.doRequest(ctx, http.MethodDelete, uri, "", nil); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	return nil
 }
 
 func (c *client) Panic(ctx context.Context) error {
+	ctx, span := c.Start(ctx, "client.panic")
+	defer span.End()
 	uri := c.address + data.RoutePanic
 	if _, err := c.doRequest(ctx, http.MethodPost, uri, "", nil); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	return nil

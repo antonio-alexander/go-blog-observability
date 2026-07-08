@@ -168,7 +168,9 @@ func (s *serviceTest) doRequest(ctx context.Context, uri, method, authorization 
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = request.Body.Close()
+	}()
 	switch response.StatusCode {
 	default:
 		byts, _ = io.ReadAll(response.Body)

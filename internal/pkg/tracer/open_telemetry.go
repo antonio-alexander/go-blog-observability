@@ -123,7 +123,7 @@ func (m *tracerOpenTelemetry) Open(ctx context.Context) error {
 }
 
 func (m *tracerOpenTelemetry) Close(ctx context.Context) {
-	if err := m.TracerProvider.Shutdown(ctx); err != nil {
+	if err := m.Shutdown(ctx); err != nil {
 		m.Error(ctx, "unable to shutdown tracer provider",
 			err)
 	}
@@ -137,9 +137,5 @@ func (m *tracerOpenTelemetry) Start(ctx context.Context, spanName string,
 		attribute.String("correlation_id", correlationId),
 		attribute.String("request_id", requestId),
 	))
-	ctx, span := m.Tracer.Start(ctx, spanName, opts...)
-	//
-	// span.SpanContext().TraceID()
-	//
-	return ctx, span
+	return m.Tracer.Start(ctx, spanName, opts...)
 }

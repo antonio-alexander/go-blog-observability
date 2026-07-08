@@ -157,7 +157,7 @@ func (m *metricsOpenTelemetry) Open(ctx context.Context) error {
 }
 
 func (m *metricsOpenTelemetry) Close(ctx context.Context) {
-	if err := m.MeterProvider.Shutdown(ctx); err != nil {
+	if err := m.Shutdown(ctx); err != nil {
 		m.Error(ctx, "error while shutting down meter provider",
 			err)
 	}

@@ -458,4 +458,12 @@ There are a number of scenarios that can be used to generate specific kinds of s
 
 - Why do I need to use histograms to measure latency?
 
+> It's math (so you can stop reading here if you want); but counters simply allow you to do point arithmatic on a set of values while a histogram stores data in different buckets that allow you to properly calculate percentile values. The math reason is not dissimilar to a finite/infinite response filter (...or the calculation your car uses to calculate miles per gallon)
+
 - What's your opinion on middleware when setting up your traces and metrics?
+
+> I think...eventually convenience will dictate you should use middleware, generally wanting to turn observability on and off will be more useful with middleware and/or if you wanted to implement observability with the least amount of friction (e.g. just putting a single span on the endpoint and not on individual layers/functions)
+
+- What's this business with RecordError and SetStatus?
+
+> It's a PITA, but...when a span fails, it helps to communicate that it failed. RecordError() does just that; but if something is successful, it also helps to SetStatus to communicate success. Errors are infinitely more important than the alternative, but in general it means that when you filter traces, you don't have to worry about them being 'unset'

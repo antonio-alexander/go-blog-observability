@@ -73,7 +73,7 @@ type logicTest struct {
 		cache.Cache
 	}
 	logic, logger,
-	metrics, opentel interface {
+	metrics interface {
 		internal.Configurer
 		internal.Opener
 	}

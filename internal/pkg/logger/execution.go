@@ -22,5 +22,5 @@ func getAttributes(items []any) []slog.Attr {
 }
 
 func hasFormatIdentifiers(s string) bool {
-	return fmt.Sprintf(s) != s
+	return fmt.Sprintf(s) != s //nolint: govet,staticcheck
 }

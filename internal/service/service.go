@@ -28,6 +28,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -35,6 +36,12 @@ import (
 type service struct {
 	sync.RWMutex
 	sync.WaitGroup
+	*mux.Router
+	*http.Server
+	logger.Logger
+	metrics.Metrics
+	tracer.Tracer
+	authz.Authz
 	config struct {
 		address          string
 		port             string
@@ -49,15 +56,9 @@ type service struct {
 		hostname         string
 		maxRequestBytes  int64
 	}
-	ctx    context.Context
-	cancel context.CancelFunc
-	cache  internal.Clearer
-	logger.Logger
-	metrics.Metrics
-	tracer.Tracer
-	authz.Authz
-	*mux.Router
-	*http.Server
+	ctx        context.Context
+	cancel     context.CancelFunc
+	cache      internal.Clearer
 	meter      metrics.Meter
 	histograms struct {
 		sync.RWMutex
@@ -112,16 +113,19 @@ func New(parameters ...any) interface {
 	return s
 }
 
+func (s *service) handleResponse(ctx context.Context, writer http.ResponseWriter, err error, items ...any) {
+	if err := handleResponse(writer, err, items...); err != nil {
+		s.Error(ctx, "unable to handle response", err)
+	}
+}
+
 func (s *service) launchServer() error {
 	started := make(chan struct{})
 	chErr := make(chan error, 1)
-	s.Add(1)
-	go func() {
-		defer s.WaitGroup.Done()
+	s.Go(func() {
 		defer close(chErr)
-
 		if !s.config.corsDisabled {
-			s.Server.Handler = cors.New(cors.Options{
+			s.Handler = cors.New(cors.Options{
 				AllowedOrigins:   s.config.allowedOrigins,
 				AllowCredentials: s.config.allowCredentials,
 				AllowedMethods:   s.config.allowedMethods,
@@ -130,10 +134,10 @@ func (s *service) launchServer() error {
 			}).Handler(s.Router)
 		}
 		close(started)
-		if err := s.Server.ListenAndServe(); err != nil {
+		if err := s.ListenAndServe(); err != nil {
 			chErr <- err
 		}
-	}()
+	})
 	<-started
 	select {
 	case err := <-chErr:
@@ -148,6 +152,7 @@ func (s *service) launchServer() error {
 	}
 }
 
+// REVIEW: this implementation isn't correct
 func (s *service) readRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, int64(s.config.maxRequestBytes))
 	bytes, err := io.ReadAll(r.Body)
@@ -228,10 +233,19 @@ func (s *service) readHistogram(histogramName string) metrics.Float64Histogram {
 func (s *service) middlewareInitialize() middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx := pkgcontext.WithCorrelationId(r.Context(), getCorrelationId(r))
+			correlationId := getCorrelationId(r)
+			spanName := r.Method + " " + routeFromPath(r.URL.Path)
+			ctx, span := s.Start(r.Context(), spanName)
+			defer span.End()
+			ctx = pkgcontext.WithCorrelationId(ctx, correlationId)
 			ctx = pkgcontext.WithRequestId(ctx, internal.GenerateId())
 			r = r.WithContext(ctx)
-			next.ServeHTTP(w, r)
+			rW := &statusCodeResponseWriter{ResponseWriter: w}
+			next.ServeHTTP(rW, r)
+			switch rW.statusCode {
+			case http.StatusOK, http.StatusNoContent:
+				span.SetStatus(codes.Ok, "")
+			}
 		})
 	}
 }
@@ -241,7 +255,11 @@ func (s *service) middlewareLatency() middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func(ctx context.Context, start time.Time) {
-				histogramDuration.Record(ctx, time.Since(start).Seconds())
+				histogramDuration.Record(ctx, time.Since(start).Seconds(),
+					metric.WithAttributes(
+						attribute.String("http.method", r.Method),
+						attribute.String("http.route", routeFromPath(r.URL.Path)),
+					))
 			}(r.Context(), time.Now())
 			next.ServeHTTP(w, r)
 		})
@@ -301,6 +319,7 @@ func (s *service) middlewareRequest() middleware {
 	}
 }
 
+// REVIEW: what's this accomplish?
 func (s *service) middlewareSpan() middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -320,7 +339,7 @@ func (s *service) middlewareSpan() middleware {
 }
 
 func (s *service) endpointDefault(writer http.ResponseWriter, request *http.Request) {
-	fmt.Fprintf(writer,
+	_, _ = fmt.Fprintf(writer,
 		"go-blog-observability\n"+
 			"Version: \"%s\"\n"+
 			"Git Commit: \"%s\"\n"+
@@ -333,71 +352,62 @@ func (s *service) endpointEmployeeCreate(writer http.ResponseWriter, request *ht
 
 	ctx := request.Context()
 	bytes, err := s.readRequestBody(writer, request)
-	defer request.Body.Close()
+	defer func() {
+		_ = request.Body.Close()
+	}()
 	if err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	if err := json.Unmarshal(bytes, &employeeRequest); err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	employee, err := s.EmployeeCreate(ctx, getAuthorization(request), employeeRequest.EmployeePartial)
-	if err := handleResponse(writer, err, &data.Response{
+	s.handleResponse(request.Context(), writer, err, &data.Response{
 		Employee: employee,
-	}); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employee_create", slog.Int64("emp_no", employee.EmpNo))
-	} else {
-		s.Debug(ctx, "failed to execute employee_create", err, slog.Int64("emp_no", employee.EmpNo))
-	}
+	})
 }
 
 func (s *service) endpointEmployeeRead(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	empNo, err := empNoFromPath(mux.Vars(request))
 	if err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	employee, err := s.EmployeeRead(ctx, getAuthorization(request), empNo)
-	if err := handleResponse(writer, err, &data.Response{
-		Employee: employee,
-	}); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employee_read", slog.Int64("emp_no", empNo))
-	} else {
-		s.Debug(ctx, "failed to execute employee_read", err, slog.Int64("emp_no", empNo))
-	}
+	s.handleResponse(request.Context(), writer, err,
+		&data.Response{Employee: employee})
 }
 
 func (s *service) endpointEmployeesSearch(writer http.ResponseWriter, request *http.Request) {
 	var search data.EmployeeSearch
 
 	ctx := request.Context()
-	if err := request.ParseForm(); err != nil {
-		_ = handleResponse(writer, err, nil)
+	switch request.Method {
+	default:
+		writer.WriteHeader(http.StatusMethodNotAllowed)
 		return
+	case "QUERY":
+		bytes, err := io.ReadAll(request.Body)
+		if err != nil {
+			s.handleResponse(request.Context(), writer, err, nil)
+			return
+		}
+		if err := json.Unmarshal(bytes, &search); err != nil {
+			s.handleResponse(request.Context(), writer, err, nil)
+			return
+		}
+	case http.MethodGet:
+		if err := request.ParseForm(); err != nil {
+			s.handleResponse(request.Context(), writer, err, nil)
+			return
+		}
+		search.FromParams(request.Form)
 	}
-	search.FromParams(request.Form)
 	employees, err := s.EmployeesSearch(ctx, getAuthorization(request), search)
-	if err := handleResponse(writer, err, &data.Response{
-		Employees: employees,
-	}); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employees_search")
-	} else {
-		s.Debug(ctx, "failed to execute employees_search", err)
-	}
+	s.handleResponse(request.Context(), writer, err, &data.Response{Employees: employees})
 }
 
 func (s *service) endpointEmployeeUpdate(writer http.ResponseWriter, request *http.Request) {
@@ -406,51 +416,35 @@ func (s *service) endpointEmployeeUpdate(writer http.ResponseWriter, request *ht
 	ctx := request.Context()
 	empNo, err := empNoFromPath(mux.Vars(request))
 	if err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	bytes, err := s.readRequestBody(writer, request)
-	defer request.Body.Close()
+	defer func() {
+		_ = request.Body.Close()
+	}()
 	if err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	if err := json.Unmarshal(bytes, &employeeRequest); err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	employee, err := s.EmployeeUpdate(ctx, getAuthorization(request),
 		empNo, employeeRequest.EmployeePartial)
-	if err := handleResponse(writer, err, &data.Response{
-		Employee: employee,
-	}); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employee_update", slog.Int64("emp_no", employee.EmpNo))
-	} else {
-		s.Debug(ctx, "failed to execute employee_update", slog.Int64("emp_no", employee.EmpNo))
-	}
+	s.handleResponse(request.Context(), writer, err, &data.Response{Employee: employee})
 }
 
 func (s *service) endpointEmployeeDelete(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	empNo, err := empNoFromPath(mux.Vars(request))
 	if err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	err = s.EmployeeDelete(ctx, getAuthorization(request), empNo)
-	if err := handleResponse(writer, err, nil); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employee_delete", slog.Int64("emp_no", empNo))
-	} else {
-		s.Debug(ctx, "failed to execute employee_delete", err, slog.Int64("emp_no", empNo))
-	}
+	s.handleResponse(request.Context(), writer, err, nil)
 }
 
 func (s *service) endpointSleep(writer http.ResponseWriter, request *http.Request) {
@@ -458,26 +452,19 @@ func (s *service) endpointSleep(writer http.ResponseWriter, request *http.Reques
 
 	ctx := request.Context()
 	bytes, err := s.readRequestBody(writer, request)
-	defer request.Body.Close()
+	defer func() {
+		_ = request.Body.Close()
+	}()
 	if err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	if err := json.Unmarshal(bytes, &sleepRequest); err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(request.Context(), writer, err, nil)
 		return
 	}
 	sleep, err := s.Sleep(ctx, sleepRequest)
-	if err := handleResponse(writer, err, nil); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed sleep", slog.String("sleep_id", sleep.Id),
-			slog.Duration("sleep_duration", time.Duration(sleep.Duration)))
-	} else {
-		s.Debug(ctx, "failed to execute sleep", err, slog.String("sleep_id", sleep.Id))
-	}
+	s.handleResponse(request.Context(), writer, err, sleep)
 }
 
 func (s *service) endpointPanic(writer http.ResponseWriter, request *http.Request) {
@@ -489,19 +476,19 @@ func (s *service) endpointCacheClear(writer http.ResponseWriter, request *http.R
 	if s.cache != nil {
 		ctx := request.Context()
 		if err := s.cache.Clear(ctx); err != nil {
-			_ = handleResponse(writer, err, nil)
+			s.handleResponse(request.Context(), writer, err, nil)
 			return
 		}
 		s.Debug(ctx, "executed cache_clear")
 	}
-	_ = handleResponse(writer, nil, nil)
+	s.handleResponse(request.Context(), writer, nil, nil)
 }
 
 func (s *service) handleFunc(path string, f http.HandlerFunc, middlewares ...middleware) *mux.Route {
 	if len(middlewares) <= 0 {
-		return s.Router.HandleFunc(path, f)
+		return s.HandleFunc(path, f)
 	}
-	return s.Router.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+	return s.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 		final := http.Handler(f)
 		for i := len(middlewares) - 1; i >= 0; i-- {
 			final = middlewares[i](final)
@@ -524,7 +511,14 @@ func (s *service) buildRoutes() {
 	s.handleFunc("/", s.endpointDefault, middlewares...)
 	s.handleFunc(data.RouteSleep, s.endpointSleep, middlewares...)
 	s.handleFunc(data.RoutePanic, s.endpointPanic, middlewares...)
-	s.handleFunc(data.RouteEmployeesSearch, s.endpointEmployeesSearch, middlewares...)
+	s.handleFunc(data.RouteEmployeesSearch, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case http.MethodGet, "QUERY":
+			s.endpointEmployeesSearch(w, r)
+		}
+	}, middlewares...)
 	s.handleFunc(data.RouteEmployees,
 		func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
@@ -629,7 +623,7 @@ func (s *service) Open(ctx context.Context) error {
 		}
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.Server.Addr = net.JoinHostPort(s.config.address, s.config.port)
+	s.Addr = net.JoinHostPort(s.config.address, s.config.port)
 	s.buildRoutes()
 	return s.launchServer()
 }
@@ -640,7 +634,7 @@ func (s *service) Close(ctx context.Context) {
 
 	ctx, cancel := context.WithTimeout(ctx, s.config.shutdownTimeout)
 	defer cancel()
-	if err := s.Server.Shutdown(ctx); err != nil {
+	if err := s.Shutdown(ctx); err != nil {
 		s.Error(ctx, "unable to shutdown rest service", err)
 	}
 	s.cancel()

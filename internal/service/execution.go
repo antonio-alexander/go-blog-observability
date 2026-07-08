@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/antonio-alexander/go-blog-observability/internal/authz"
 	"github.com/antonio-alexander/go-blog-observability/internal/data"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 )
@@ -25,7 +24,7 @@ func errorTypeToStatusCode(e errors.ErrorType) int {
 		return http.StatusRequestTimeout
 	case errors.ErrorTypeNotImplemented:
 		return http.StatusNotImplemented
-	case authz.ErrorTypeUnauthorized:
+	case errors.ErrorTypeUnauthorized:
 		return http.StatusUnauthorized
 	case errors.ErrorTypeTooMuchData:
 		return http.StatusRequestEntityTooLarge

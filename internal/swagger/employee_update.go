@@ -1,6 +1,9 @@
 package swagger
 
-import "github.com/antonio-alexander/go-blog-observability/internal/data"
+import (
+	"github.com/antonio-alexander/go-blog-observability/internal/data"
+	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
+)
 
 // swagger:route POST /employees/{emp_no} Employee UpdateEmployee
 // Updates an employee using its id.
@@ -16,11 +19,25 @@ import "github.com/antonio-alexander/go-blog-observability/internal/data"
 //
 // responses:
 //   200: EmployeePostResponseOk
+//   401: EmployeePostResponseUnauthorized
+//   500: EmployeePostResponseInternalServerError
 
 // swagger:response EmployeePostResponseOk
 type EmployeePostResponseOk struct {
 	// in:body
 	Employee data.Employee `json:"employee"`
+}
+
+// swagger:response EmployeePostResponseUnauthorized
+type EmployeePostResponseUnauthorized struct {
+	// in:body
+	Body errors.ErrorUnauthorized
+}
+
+// swagger:response EmployeePostResponseInternalServerError
+type EmployeePostResponseInternalServerError struct {
+	// in:body
+	Body errors.ErrorCommon
 }
 
 // swagger:parameters UpdateEmployee

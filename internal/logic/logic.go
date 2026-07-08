@@ -191,12 +191,18 @@ func (l *logic) Close(ctx context.Context) {
 }
 
 func (l *logic) EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
-	ctx, span := l.Start(ctx, "logic.EmployeeCreate")
+	ctx, span := l.Start(ctx, "logic.employee_create")
 	defer span.End()
 	if l.config.mutateDisabled {
+		span.RecordError(ErrMutationDisabled)
 		return nil, ErrMutationDisabled
 	}
-	return l.sql.EmployeeCreate(ctx, employeePartial)
+	employee, err := l.sql.EmployeeCreate(ctx, employeePartial)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
@@ -208,6 +214,10 @@ func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 			if err != nil {
 				switch {
 				default:
+					return nil, backoff.Permanent(err)
+				case errors.Is(err, errors.ErrTypeNotCachedInProgressSet):
+					//if in progress set, we should read not attempt to
+					// retry, but read directly from sql
 					return nil, backoff.Permanent(err)
 				case errors.Is(err, errors.ErrNotCached),
 					errors.Is(err, errors.ErrNotCachedRetry):
@@ -231,10 +241,10 @@ func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 				errors.Is(err, errors.ErrNotCachedRetry)) {
 			l.Debug(ctx, "cache hit (not found) for employee", slog.Int64("emp_no", empNo))
 			l.addEmployeeHit(ctx, empNo)
+			span.RecordError(err)
 			return nil, err
 		}
 		l.Debug(ctx, "cache miss (not found) for employee", slog.Int64("emp_no", empNo))
-		// l.addEmployeeMiss(ctx, empNo)
 	}
 	employee, err := l.sql.EmployeeRead(ctx, empNo)
 	if err != nil {
@@ -243,8 +253,10 @@ func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 				l.Debug(ctx, "error while writing employee not found to cache",
 					slog.Int64("emp_no", empNo), err)
 			}
+			span.RecordError(err)
 			return nil, err
 		}
+		span.RecordError(err)
 		return nil, err
 	}
 	if l.config.cacheEnabled {
@@ -265,6 +277,7 @@ func (l *logic) EmployeesSearch(ctx context.Context, search data.EmployeeSearch)
 	if l.config.cacheEnabled {
 		searchKey, err = search.ToKey()
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		employees, err := backoff.Retry(ctx, func() ([]*data.Employee, error) {
@@ -296,6 +309,7 @@ func (l *logic) EmployeesSearch(ctx context.Context, search data.EmployeeSearch)
 				errors.Is(err, errors.ErrNotCachedRetry)) {
 			l.Debug(ctx, "cache hit (not found) for employee search ", slog.String("search_key", searchKey))
 			l.addEmployeeHit(ctx, searchKey)
+			span.RecordError(err)
 			return nil, err
 		}
 		l.Debug(ctx, "cache miss (not found) for employee search", slog.String("search_key", searchKey))
@@ -309,6 +323,7 @@ func (l *logic) EmployeesSearch(ctx context.Context, search data.EmployeeSearch)
 					slog.String("search_key", searchKey), err)
 			}
 		}
+		span.RecordError(err)
 		return nil, err
 	}
 	if l.config.cacheEnabled {
@@ -324,10 +339,12 @@ func (l *logic) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial
 	ctx, span := l.Start(ctx, "logic.EmployeeUpdate")
 	defer span.End()
 	if l.config.mutateDisabled {
+		span.RecordError(ErrMutationDisabled)
 		return nil, ErrMutationDisabled
 	}
 	employee, err := l.sql.EmployeeUpdate(ctx, empNo, employeePartial)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	if l.config.cacheEnabled {
@@ -345,9 +362,11 @@ func (l *logic) EmployeeDelete(ctx context.Context, empNo int64) error {
 	ctx, span := l.Start(ctx, "logic.EmployeeDelete")
 	defer span.End()
 	if l.config.mutateDisabled {
+		span.RecordError(ErrMutationDisabled)
 		return ErrMutationDisabled
 	}
 	if err := l.sql.EmployeeDelete(ctx, empNo); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if l.config.cacheEnabled {
