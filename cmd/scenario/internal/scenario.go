@@ -452,9 +452,7 @@ func scenarioSustainedTraffic(ctx context.Context, envs map[string]string, logge
 
 func scenarioPercentileLatency(ctx context.Context, envs map[string]string, logger logger.Logger,
 	clients ...client.Client) error {
-	// const correlationId string = "scenario_sustained_traffic"
-	const minClients int = 1
-	const minSleep int64 = 1 //1s
+	const minClients int = 10
 
 	var wg sync.WaitGroup
 
@@ -472,13 +470,6 @@ func scenarioPercentileLatency(ctx context.Context, envs map[string]string, logg
 			scenarioDuration = time.Duration(i) * time.Second
 		}
 	}
-	scenarioSleepDuration := int64(1)
-	if s, ok := envs["SCENARIO_SLEEP_DURATION"]; ok {
-		i, err := strconv.ParseInt(s, 10, 64)
-		if err == nil {
-			scenarioSleepDuration = i
-		}
-	}
 	scenarioSleepId := internal.GenerateId()
 	if s, ok := envs["SCENARIO_SLEEP_ID"]; ok {
 		scenarioSleepId = s
@@ -490,45 +481,66 @@ func scenarioPercentileLatency(ctx context.Context, envs map[string]string, logg
 			scenarioPercentile = i
 		}
 	}
+	minSleep := int64(1) //1s
+	if s, ok := envs["SCENARIO_MIN_SLEEP"]; ok {
+		i, err := strconv.ParseInt(s, 10, 64)
+		if err == nil {
+			minSleep = i
+		}
+	}
+	maxSleep := int64(5) //5s
+	if s, ok := envs["SCENARIO_MAX_SLEEP"]; ok {
+		i, err := strconv.ParseInt(s, 10, 64)
+		if err == nil {
+			maxSleep = i
+		}
+	}
 	if len(clients) < minClients {
 		return errors.Must(errors.New("not enough clients provided"))
 	}
 
 	//determine percentiles
 	sleepDurations := make([]int64, 0, len(clients))
-	switch scenarioPercentile {
-	case 50:
-		n := len(clients) % 2
-		for i := range n {
-			sleepDurations[i] = minSleep
+	switch {
+	default:
+		return errors.Must(errors.New("unsupported scenario percentile"))
+	case scenarioPercentile >= 90:
+		// how to get n == 9
+		n := 9
+		if len(clients)%n == 0 {
+			n--
 		}
-		for i := range len(clients) - n {
-			sleepDurations[i+n] = minSleep
+		for range n {
+			sleepDurations = append(sleepDurations, minSleep)
+		}
+		for range len(clients) - n {
+			sleepDurations = append(sleepDurations, maxSleep)
+		}
+	case scenarioPercentile == 50: //simulate conditions p50
+		n := 5
+		if len(clients)%n == 0 {
+			n--
+		}
+		for range n {
+			sleepDurations = append(sleepDurations, minSleep)
+		}
+		for range len(clients) - n {
+			sleepDurations = append(sleepDurations, maxSleep)
 		}
 	}
 
-	//clear cache
-	if err := clients[0].CacheClear(ctx); err != nil {
-		return err
-	}
-
-	//cache the sleep so we can always engage the logic
-	// in the same way
-	if _, err := clients[0].Sleep(ctx, data.Sleep{
-		Id:       scenarioSleepId,
-		Duration: scenarioSleepDuration,
-	}); err != nil {
-		return err
-	}
+	//no real need to interact with the cache
 
 	//generate start/stop channels
 	start, stop := make(chan struct{}), make(chan struct{})
 
+	//start go routines
 	for i := range clients {
-		//TODO: calculate sleep duration based on percentile
 		wg.Add(1)
 		go func(ctx context.Context, clientNumber int, client client.Client, sleepDuration int64) {
 			defer wg.Done()
+
+			var nRequests, nRequestsFailed int
 
 			ctx = pkgcontext.WithCorrelationId(ctx, internal.GenerateId())
 			logger.Info(ctx, "generated correlation id",
@@ -549,11 +561,20 @@ func scenarioPercentileLatency(ctx context.Context, envs map[string]string, logg
 			for {
 				select {
 				case <-stop:
+					logger.Info(ctx, "execution completed",
+						slog.String("scenario", "percentile_latency"),
+						slog.Int("client_number", clientNumber),
+						slog.Int("number_of_requests", nRequests),
+						slog.Int("number_of_failed_requests", nRequestsFailed),
+						slog.Int64("sleep_duration", sleepDuration))
 					return
 				case <-tRead.C:
 					if err := sleepFx(ctx); err != nil {
 						logger.Error(ctx, "error while sleeping", err)
+						nRequestsFailed++
+						continue
 					}
+					nRequests++
 				}
 			}
 		}(ctx, i, clients[i], sleepDurations[i])

@@ -21,7 +21,7 @@
                 "DATABASE_NAME": "employees",
                 "DATABASE_USER": "mysql",
                 "DATABASE_PASSWORD": "mysql",
-                "DATABASE_QUERY_TIMEOUT": "10",
+                "DATABASE_QUERY_TIMEOUT": "30",
                 "DATABASE_PARSE_TIME": "true",
                 "SERVICE_ADDRESS": "",
                 "SERVICE_PORT": "8080",
@@ -74,7 +74,7 @@
                 "CLIENT_ADDRESS": "localhost",
                 "CLIENT_PORT": "8080",
                 "CLIENT_PROTOCOL": "http",
-                "CLIENT_TIMEOUT": "10",
+                "CLIENT_TIMEOUT": "60",
                 "CACHE_DISABLED": "true",
                 "SSL_CA_FILE": "",
                 "SSL_KEY_FILE": "./certs/ssl.key",
@@ -82,16 +82,19 @@
                 "LOG_LEVEL": "trace",
                 "CACHE_PRUNE_INTERVAL": "10",
                 "N_CLIENTS": "10",
-                "SCENARIO": "stampeding_herd", //stampeding_herd, cache_not_found, sleep_retry, sustained_traffic, percentile_latency
+                "USER_ID": "14f3d416-6739-4b7f-94c0-74d50d6aa61f",
+                "AUTHZ_PRIVATE_SIGNING_METHOD": "HS256",
+                "AUTHZ_PRIVATE_SIGNING_KEY": "secret",
+                "AUTHZ_PRIVATE_SIGNING_KEY_FILE": "",
+                "SCENARIO": "percentile_latency", //stampeding_herd, cache_not_found, sleep_retry, sustained_traffic, percentile_latency
                 "SCENARIO_READ_INTERVAL": "2",
                 "SCENARIO_DURATION": "30",
                 "SCENARIO_SLEEP_INTERVAL": "1",
                 "SCENARIO_SLEEP_DURATION": "1",
                 "SCENARIO_SLEEP_ID": "",
-                "USER_ID": "14f3d416-6739-4b7f-94c0-74d50d6aa61f",
-                "AUTHZ_PRIVATE_SIGNING_METHOD": "HS256",
-                "AUTHZ_PRIVATE_SIGNING_KEY": "secret",
-                "AUTHZ_PRIVATE_SIGNING_KEY_FILE": "",
+                "SCENARIO_PERCENTILE": "90", //50, 90
+                "SCENARIO_MIN_SLEEP": "1",
+                "SCENARIO_MAX_SLEEP": "10",
             }
         }
     ]

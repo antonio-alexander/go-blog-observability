@@ -209,6 +209,10 @@ func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 				switch {
 				default:
 					return nil, backoff.Permanent(err)
+				case errors.Is(err, errors.ErrTypeNotCachedInProgressSet):
+					//if in progress set, we should read not attempt to
+					// retry, but read directly from sql
+					return nil, backoff.Permanent(err)
 				case errors.Is(err, errors.ErrNotCached),
 					errors.Is(err, errors.ErrNotCachedRetry):
 					l.Debug(ctx, "logic cache miss (retry) for employee",

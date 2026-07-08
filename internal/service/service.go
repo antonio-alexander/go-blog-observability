@@ -241,7 +241,11 @@ func (s *service) middlewareLatency() middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func(ctx context.Context, start time.Time) {
-				histogramDuration.Record(ctx, time.Since(start).Seconds())
+				histogramDuration.Record(ctx, time.Since(start).Seconds(),
+					metric.WithAttributes(
+						attribute.String("http.method", r.Method),
+						attribute.String("http.route", routeFromPath(r.URL.Path)),
+					))
 			}(r.Context(), time.Now())
 			next.ServeHTTP(w, r)
 		})
@@ -468,7 +472,7 @@ func (s *service) endpointSleep(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	sleep, err := s.Sleep(ctx, sleepRequest)
-	if err := handleResponse(writer, err, nil); err != nil {
+	if err := handleResponse(writer, err, sleep); err != nil {
 		s.Error(ctx, "unable to handle response", err)
 		return
 	}
@@ -476,7 +480,7 @@ func (s *service) endpointSleep(writer http.ResponseWriter, request *http.Reques
 		s.Debug(ctx, "successfully executed sleep", slog.String("sleep_id", sleep.Id),
 			slog.Duration("sleep_duration", time.Duration(sleep.Duration)))
 	} else {
-		s.Debug(ctx, "failed to execute sleep", err, slog.String("sleep_id", sleep.Id))
+		s.Debug(ctx, "failed to execute sleep", err, slog.String("sleep_id", sleepRequest.Id))
 	}
 }
 
