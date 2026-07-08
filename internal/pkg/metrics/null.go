@@ -6,6 +6,7 @@ import (
 	"github.com/antonio-alexander/go-blog-observability/internal"
 
 	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 type nullInt64Counter struct{}
@@ -15,6 +16,10 @@ func (n *nullInt64Counter) Add(ctx context.Context, incr int64, options ...metri
 type nullInt64UpDownCounter struct{}
 
 func (n *nullInt64UpDownCounter) Add(ctx context.Context, incr int64, options ...metric.AddOption) {}
+
+type nullInt64Gauge struct{}
+
+func (n *nullInt64Gauge) Record(ctx context.Context, value int64, options ...metric.RecordOption) {}
 
 type nullInt64Histogram struct{}
 
@@ -34,6 +39,10 @@ func (n *nullMeter) Int64Counter(name string, options ...metric.Int64CounterOpti
 
 func (n *nullMeter) Int64UpDownCounter(name string, options ...metric.Int64UpDownCounterOption) (Int64UpDownCounter, error) {
 	return &nullInt64UpDownCounter{}, nil
+}
+
+func (n *nullMeter) Int64Gauge(name string, options ...metric.Int64GaugeOption) (Int64Gauge, error) {
+	return &nullInt64Gauge{}, nil
 }
 
 func (n *nullMeter) Int64Histogram(name string, options ...metric.Int64HistogramOption) (Int64Histogram, error) {
@@ -62,4 +71,8 @@ func (m *metricsNull) Close(ctx context.Context) {}
 
 func (m *metricsNull) Meter(name string, options ...metric.MeterOption) Meter {
 	return &nullMeter{}
+}
+
+func (m *metricsNull) MeterProvider() *sdkmetric.MeterProvider {
+	return nil
 }

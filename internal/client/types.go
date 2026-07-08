@@ -4,7 +4,12 @@ import (
 	"context"
 
 	"github.com/antonio-alexander/go-blog-observability/internal/data"
+	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 )
+
+const errTimeout string = "client timed out"
+
+var ErrTimeout = errors.Must(errors.New(errTimeout))
 
 type Client interface {
 	EmployeeCreate(ctx context.Context, token string,
@@ -19,4 +24,6 @@ type Client interface {
 	Sleep(ctx context.Context, sleep data.Sleep) (*data.Sleep, error)
 	Panic(ctx context.Context) error
 	CacheClear(ctx context.Context) error
+
+	Authorize(ctx context.Context, userId string) (string, error)
 }

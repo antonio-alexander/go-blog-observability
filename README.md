@@ -396,21 +396,21 @@ The observability you get through traces and spans, although verbose, helps you 
 
 <!-- TODO: mention how to visualize in grafana -->
 
-## Scenarios
+## Latency at Scale
 
-There are a number of scenarios that can be used to generate specific kinds of signals that can be observed through grafana using tempo, prometheus and loki. The scenario application will print correlation ids you can use to filter those signals.
+I think one of the more confusing things about observability, especially when it comes to latency, is understanding how it works at scale; scale meaning how latency is impacted by concurrency, load and differing request payloads. At a glance, it may seem that if you can reduce latency for a single request, that latency reduction will carry to other requests at scale, but reduction of latency doesn't circumvent the physics of the request: you still have fixed resources.
 
-### Percentile Latency (percentile_latency)
+In my opinion, the easiest way to understand latency at scale is looking at latency reduction from the perspective of a database if you _don't_ (or can't) use a cache. Databases personify limits at scale; they have _very_ fixed resources and due to the nature of the technology, it's difficult to vertically or horizontally scale. A given database has a fixed number of connections; even though the number of connections can be increased, increasing connections doesn't necessarily reduce latency since a connection can also be considered a share of the actual fixed resources (i.e., the physics of a database connection): disk io (storage/swap), memory (RAM) and network io. As you increase the number of connections, you increase concurrent usage of those resources and will eventually hit a wall (where your latency spikes).
 
-### Sustained Traffic (sustained_traffic)
+For example: lets say you have a database that only has five connections. If you have five concurrent requests, your latency will reflect the time it takes to process a request, make the database call and return it. If you have more than five concurrent requests, your latency will reflect the aforementioned processes, but because all the connections are being used, it also has to wait (i.e., queue) for a connection to become available. Although if the sql is optimized, this may be a short period of time, at scale it may be a flat amount of time added to __EVERY__ request.
 
-### Stampeding Herd (stampeding_herd)
+> It may seem intuitive, but at scale its easy to forget that queueing has knock-on effects, mainly that depending on where you are in line, you may have to wait longer; queues are generally FIFO (first in, first out), so the latency added should feel like requests just take longer in general (e.g. your P50 increases), but there are variables that may cause requests to be queued differently (e.g., processing the request takes slightly longer) so you may have odd P90s as a result which aren't necessarily tied to the number of database connections
 
-### Cache Not Found (cache_not_found)
+These are some basic examples of common ways to reduce latency, but at scale you may find that the latency is reduced by less than expected:
 
-### Sleep Retry (sleep_retry)
-
-<!-- TODO: add section describing certain scenarios and how we can use logs, metrics, traces (and spans) to identify them -->
+- with database operations, you can reduce latency by use of a cache; caches (e.g., redis) generally support a __much__ higher number of concurrent requests and serve data an order of magnitude faster
+- with http requests that are idempotent (e.g. a correctly implemented PUT) can be cached at the browser level indefinitely (or cached by a proxy); this reduces the round-trip time and can reduce the load on the server (and any components in-between)
+- with http requests that read data (and can safely cache it), you can set cache headers to reduce downstream latency
 
 ## Issues I Ran Into
 
@@ -442,7 +442,7 @@ There are a number of scenarios that can be used to generate specific kinds of s
 
 - What if I want to have traces...but not print those __trace__ logs?
 
-> This is _easier_ with the open telemetry setup since you can have multiple exporters; you'd have to create a standard out exporter and have it only print logs for a specific level, while the trace logs could still be exported via an open telemetry handler
+> This is _easier_ with the open telemetry setup since you can have multiple exporters; you'd have to create a standard out exporter and have it only print logs for a specific level, while the trace logs could still be exported via an open telemetry handler. Alternatively (this is what I did) you can create a trace for open telemetry and define a TRACE log that gets printed at the same time (this can also reduce the chattiness of open-telemetry logs)
 
 - What if I want to put an entire json body in an attribute?
 
@@ -454,8 +454,28 @@ There are a number of scenarios that can be used to generate specific kinds of s
 
 - Can't we just print counters at a set pace to standard out rather than using open telemetry metrics?
 
-> Yes, this does work and is a common solution. I personally don't like it since it's not something that's easily consumable visually by humans. Using grafana or datadog is much better/easier to consume as a human
+> Yes, this does work and is a common solution but doesn't lend itself well to consume, standard out is not a database and doesn't lend itself well to finding the information you need; in general it's unrealistic to look at counter logs and derive some reasonable outcome
 
 - Why do I need to use histograms to measure latency?
 
+> It's math (so you can stop reading here if you want); but counters simply allow you to do point arithmatic on a set of values while a histogram stores data in different buckets that allow you to properly calculate percentile values. The math reason is not dissimilar to a finite/infinite response filter (...or the calculation your car uses to calculate miles per gallon)
+
 - What's your opinion on middleware when setting up your traces and metrics?
+
+> I think...eventually convenience will dictate you should use middleware, generally wanting to turn observability on and off will be more useful with middleware and/or if you wanted to implement observability with the least amount of friction (e.g. just putting a single span on the endpoint and not on individual layers/functions)
+
+- What's this business with RecordError and SetStatus?
+
+> It's a PITA, but...when a span fails, it helps to communicate that it failed. RecordError() does just that; but if something is successful, it also helps to SetStatus to communicate success. Errors are infinitely more important than the alternative, but in general it means that when you filter traces, you don't have to worry about them being 'unset'
+
+- Is there a difference between adding a cache on top of your persistence (e.g., sql) layer versus in a client (or elsewhere)?
+
+> Yes, both differ __significantly__ in your ability to do intelligent evictions; a cache that's directly wrapped around the persistence allows you know when data has been mutated so you can evict data from the cache and not be beholden to time-based eviction. Additional caches that wrap persistence don't have to worry about authz while client ones do. Clients not only can't implement intelligent evictions (unless they're the only consumer of the API), but they can't always be safely implemented without re-creating the authz (even though an item may be in the cache, the user may no longer have access to it)
+
+- What's a good convention/rule of thumb when it comes to timeouts and traversing multiple application layers?
+
+> Yaninyz witty put together an article [Your Go Application Probably isn’t slow for the reason you think](https://blog.stackademic.com/your-go-application-probably-isnt-slow-for-the-reason-you-think-c59a717b5743?sharedUserId=antonio-alexander) and one of the things they said was: "every outbound call gets a deadline that's shorter than the caller's"; and I think that's the best rule of thumb such that you can consistently get the error you expect (e.g., if the database timed out, you consistently get a database error rather than a client error or dueling errors)
+
+- How do you know which attributes you should attach to traces, metrics and logs?
+
+> ...well you don't (until you do). If you want to focus your effort, you should start with the processes you're trying to observe and ensure that every instance of a trace, metric and log include enough attributes to be able to re-construct what's going on with that process. For example if I were trying to qualify the hit/miss ratio for a cache under certain circumstances, I wouldn't really care about the route/method for traces beyond the initial endpoint, but it would be useful to know the correlation_id at every stage since you may be able to relate (or ...co...relate) processes that interact with each other (e.g., is the high latency ONLY with this correlation id?)

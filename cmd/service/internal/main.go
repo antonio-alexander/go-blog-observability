@@ -16,7 +16,7 @@ import (
 )
 
 func createLogger(envs map[string]string, parameters ...any) (internal.Opener, error) {
-	switch envs["LOG_TYPE"] {
+	switch envs["LOGGER_TYPE"] {
 	default:
 		logger := logger.NewNull(parameters...)
 		if err := logger.Configure(envs); err != nil {
@@ -81,7 +81,7 @@ func setup(envs map[string]string) ([]internal.Opener, error) {
 	if err != nil {
 		return nil, err
 	}
-	tracer, err := createTracer(envs)
+	tracer, err := createTracer(envs, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -93,12 +93,12 @@ func setup(envs map[string]string) ([]internal.Opener, error) {
 	if err := sql.Configure(envs); err != nil {
 		return nil, err
 	}
-	cache := cache.NewRedis(logger, tracer)
+	cache := cache.NewRedis(logger, tracer, metrics)
 	if err := cache.Configure(envs); err != nil {
 		return nil, err
 	}
-	logic := logic.NewLogic(logger, tracer,
-		metrics, sql, cache)
+	logic := logic.NewLogic(logger, tracer, metrics,
+		sql, cache)
 	if err := logic.Configure(envs); err != nil {
 		return nil, err
 	}
@@ -107,8 +107,8 @@ func setup(envs map[string]string) ([]internal.Opener, error) {
 	if err := authz.Configure(envs); err != nil {
 		return nil, err
 	}
-	service := service.New(authz,
-		cache, logger, tracer, metrics)
+	service := service.New(logger, tracer, metrics,
+		authz, cache)
 	if err := service.Configure(envs); err != nil {
 		return nil, err
 	}

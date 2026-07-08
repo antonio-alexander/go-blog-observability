@@ -14,6 +14,10 @@ type Int64UpDownCounter interface {
 	Add(ctx context.Context, incr int64, options ...metric.AddOption)
 }
 
+type Int64Gauge interface {
+	Record(ctx context.Context, value int64, options ...metric.RecordOption)
+}
+
 type Int64Histogram interface {
 	Record(ctx context.Context, incr int64, options ...metric.RecordOption)
 }
@@ -25,6 +29,7 @@ type Float64Histogram interface {
 type Meter interface {
 	Int64Counter(name string, options ...metric.Int64CounterOption) (Int64Counter, error)
 	Int64UpDownCounter(name string, options ...metric.Int64UpDownCounterOption) (Int64UpDownCounter, error)
+	Int64Gauge(name string, options ...metric.Int64GaugeOption) (Int64Gauge, error)
 	Int64Histogram(name string, options ...metric.Int64HistogramOption) (Int64Histogram, error)
 	Float64Histogram(name string, options ...metric.Float64HistogramOption) (Float64Histogram, error)
 }

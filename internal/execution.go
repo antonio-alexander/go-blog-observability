@@ -5,14 +5,14 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"uuid"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 	"github.com/pkg/errors"
 )
 
 func GenerateId() string {
-	return uuid.Must(uuid.NewRandom()).String()
+	return uuid.New().String()
 }
 
 func GetCertificate(certFile, keyFile string) (tls.Certificate, error) {

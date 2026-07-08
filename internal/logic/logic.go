@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"strconv"
-	"sync"
 
 	"github.com/antonio-alexander/go-blog-observability/internal"
 	"github.com/antonio-alexander/go-blog-observability/internal/cache"
@@ -16,14 +15,12 @@ import (
 	"github.com/antonio-alexander/go-blog-observability/internal/sql"
 
 	"github.com/cenkalti/backoff/v5"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 )
 
 type logic struct {
 	logger.Logger
-	metrics.Metrics
 	tracer.Tracer
+	metrics.Metrics
 	config struct {
 		cacheEnabled         bool
 		cacheRetryInterval   int
@@ -36,11 +33,6 @@ type logic struct {
 	cache               cache.Cache
 	sql                 sql.Sql
 	backoffRetryOptions []backoff.RetryOption
-	meter               metrics.Meter
-	counters            struct {
-		sync.RWMutex
-		data map[string]metrics.Int64Counter
-	}
 }
 
 func NewLogic(parameters ...any) interface {
@@ -64,73 +56,6 @@ func NewLogic(parameters ...any) interface {
 		}
 	}
 	return l
-}
-
-func (l *logic) createCounter(counterName string) (metrics.Int64UpDownCounter, error) {
-	l.counters.Lock()
-	defer l.counters.Unlock()
-	counter, err := createCounter(l.meter, counterName)
-	if err != nil {
-		return nil, err
-	}
-	l.counters.data[counterName] = counter
-	return counter, nil
-}
-
-func (l *logic) readCounter(counterName string) metrics.Int64Counter {
-	l.counters.RLock()
-	defer l.counters.RUnlock()
-	return l.counters.data[counterName]
-}
-
-func (l *logic) addEmployeeHit(ctx context.Context, item any) {
-	switch v := item.(type) {
-	case int64:
-		l.readCounter(counterNameEmployeeCacheHit).Add(ctx, 1,
-			metric.WithAttributes(attribute.KeyValue{
-				Key:   "emp_no",
-				Value: attribute.Int64Value(v),
-			}))
-	case string:
-		l.readCounter(counterNameEmployeeCacheHit).Add(ctx, 1,
-			metric.WithAttributes(attribute.KeyValue{
-				Key:   "emp_search_key",
-				Value: attribute.StringValue(v),
-			}))
-	}
-}
-
-func (l *logic) addEmployeeMiss(ctx context.Context, item any) {
-	switch v := item.(type) {
-	case int64:
-		l.readCounter(counterNameEmployeeCacheMiss).Add(ctx, 1,
-			metric.WithAttributes(attribute.KeyValue{
-				Key:   "emp_no",
-				Value: attribute.Int64Value(v),
-			}))
-	case string:
-		l.readCounter(counterNameEmployeeCacheMiss).Add(ctx, 1,
-			metric.WithAttributes(attribute.KeyValue{
-				Key:   "emp_search_key",
-				Value: attribute.StringValue(v),
-			}))
-	}
-}
-
-func (l *logic) addSleepHit(ctx context.Context, sleepId string) {
-	l.readCounter(counterNameSleepCacheHit).Add(ctx, 1,
-		metric.WithAttributes(attribute.KeyValue{
-			Key:   "sleep_id",
-			Value: attribute.StringValue(sleepId),
-		}))
-}
-
-func (l *logic) addSleepMiss(ctx context.Context, sleepId string) {
-	l.readCounter(counterNameSleepCacheMiss).Add(ctx, 1,
-		metric.WithAttributes(attribute.KeyValue{
-			Key:   "sleep_id",
-			Value: attribute.StringValue(sleepId),
-		}))
 }
 
 func (l *logic) Configure(envs map[string]string) error {
@@ -172,31 +97,26 @@ func (l *logic) Open(ctx context.Context) error {
 		l.backoffRetryOptions = append(l.backoffRetryOptions,
 			backoff.WithBackOff(backoff.NewExponentialBackOff()))
 	}
-	meter := l.Meter(packageName)
-	l.meter = meter
-	l.counters.data = make(map[string]metrics.Int64Counter)
-	for _, counterName := range counterNames {
-		if _, err := l.createCounter(counterName); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
 func (l *logic) Close(ctx context.Context) {
-	l.meter = nil
-	l.counters.Lock()
-	defer l.counters.Unlock()
-	l.counters.data = nil
+	//
 }
 
 func (l *logic) EmployeeCreate(ctx context.Context, employeePartial data.EmployeePartial) (*data.Employee, error) {
-	ctx, span := l.Start(ctx, "logic.EmployeeCreate")
+	ctx, span := l.Start(ctx, "logic.employee_create")
 	defer span.End()
 	if l.config.mutateDisabled {
+		span.RecordError(ErrMutationDisabled)
 		return nil, ErrMutationDisabled
 	}
-	return l.sql.EmployeeCreate(ctx, employeePartial)
+	employee, err := l.sql.EmployeeCreate(ctx, employeePartial)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
@@ -209,11 +129,12 @@ func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 				switch {
 				default:
 					return nil, backoff.Permanent(err)
+				case errors.Is(err, errors.ErrTypeNotCachedInProgressSet):
+					//if in progress set, we should read not attempt to
+					// retry, but read directly from sql
+					return nil, backoff.Permanent(err)
 				case errors.Is(err, errors.ErrNotCached),
 					errors.Is(err, errors.ErrNotCachedRetry):
-					l.Debug(ctx, "logic cache miss (retry) for employee",
-						slog.Int64("emp_no", empNo), err)
-					l.addEmployeeMiss(ctx, empNo)
 					return nil, backoff.RetryAfter(l.config.cacheRetryInterval)
 				case errors.Is(err, errors.ErrNotFound):
 					return nil, backoff.Permanent(err)
@@ -222,19 +143,14 @@ func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 			return employee, nil
 		}, l.backoffRetryOptions...)
 		if err == nil {
-			l.Debug(ctx, "cache hit employee read cache hit", slog.Int64("emp_no", empNo))
-			l.addEmployeeHit(ctx, empNo)
 			return employee, nil
 		}
 		if l.config.cacheNotFoundEnabled &&
 			(errors.Is(err, errors.ErrNotCached) ||
 				errors.Is(err, errors.ErrNotCachedRetry)) {
-			l.Debug(ctx, "cache hit (not found) for employee", slog.Int64("emp_no", empNo))
-			l.addEmployeeHit(ctx, empNo)
+			span.RecordError(err)
 			return nil, err
 		}
-		l.Debug(ctx, "cache miss (not found) for employee", slog.Int64("emp_no", empNo))
-		// l.addEmployeeMiss(ctx, empNo)
 	}
 	employee, err := l.sql.EmployeeRead(ctx, empNo)
 	if err != nil {
@@ -243,8 +159,10 @@ func (l *logic) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 				l.Debug(ctx, "error while writing employee not found to cache",
 					slog.Int64("emp_no", empNo), err)
 			}
+			span.RecordError(err)
 			return nil, err
 		}
+		span.RecordError(err)
 		return nil, err
 	}
 	if l.config.cacheEnabled {
@@ -265,6 +183,7 @@ func (l *logic) EmployeesSearch(ctx context.Context, search data.EmployeeSearch)
 	if l.config.cacheEnabled {
 		searchKey, err = search.ToKey()
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		employees, err := backoff.Retry(ctx, func() ([]*data.Employee, error) {
@@ -275,31 +194,22 @@ func (l *logic) EmployeesSearch(ctx context.Context, search data.EmployeeSearch)
 					return nil, backoff.Permanent(err)
 				case errors.Is(err, errors.ErrNotCached),
 					errors.Is(err, errors.ErrNotCachedRetry):
-					l.Debug(ctx, "search cache miss (retry)", err)
 					return nil, backoff.RetryAfter(l.config.cacheRetryInterval)
 				case errors.Is(err, errors.ErrNotFound):
-					l.Debug(ctx, "cache hit for employee search read cache hit (not found)",
-						slog.String("search_key", searchKey))
-					l.addEmployeeHit(ctx, searchKey)
 					return nil, backoff.Permanent(err)
 				}
 			}
 			return employees, nil
 		}, l.backoffRetryOptions...)
 		if err == nil {
-			l.Debug(ctx, "cache hit for employee search", slog.String("search_key", searchKey))
-			l.addEmployeeHit(ctx, searchKey)
 			return employees, nil
 		}
 		if l.config.cacheNotFoundEnabled &&
 			(errors.Is(err, errors.ErrNotCached) ||
 				errors.Is(err, errors.ErrNotCachedRetry)) {
-			l.Debug(ctx, "cache hit (not found) for employee search ", slog.String("search_key", searchKey))
-			l.addEmployeeHit(ctx, searchKey)
+			span.RecordError(err)
 			return nil, err
 		}
-		l.Debug(ctx, "cache miss (not found) for employee search", slog.String("search_key", searchKey))
-		l.addEmployeeMiss(ctx, searchKey)
 	}
 	employees, err := l.sql.EmployeesSearch(ctx, search)
 	if err != nil {
@@ -309,6 +219,7 @@ func (l *logic) EmployeesSearch(ctx context.Context, search data.EmployeeSearch)
 					slog.String("search_key", searchKey), err)
 			}
 		}
+		span.RecordError(err)
 		return nil, err
 	}
 	if l.config.cacheEnabled {
@@ -324,10 +235,12 @@ func (l *logic) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial
 	ctx, span := l.Start(ctx, "logic.EmployeeUpdate")
 	defer span.End()
 	if l.config.mutateDisabled {
+		span.RecordError(ErrMutationDisabled)
 		return nil, ErrMutationDisabled
 	}
 	employee, err := l.sql.EmployeeUpdate(ctx, empNo, employeePartial)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	if l.config.cacheEnabled {
@@ -345,9 +258,11 @@ func (l *logic) EmployeeDelete(ctx context.Context, empNo int64) error {
 	ctx, span := l.Start(ctx, "logic.EmployeeDelete")
 	defer span.End()
 	if l.config.mutateDisabled {
+		span.RecordError(ErrMutationDisabled)
 		return ErrMutationDisabled
 	}
 	if err := l.sql.EmployeeDelete(ctx, empNo); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if l.config.cacheEnabled {
@@ -371,9 +286,6 @@ func (l *logic) Sleep(ctx context.Context, s data.Sleep) (*data.Sleep, error) {
 					return nil, backoff.Permanent(err)
 				case errors.Is(err, errors.ErrNotCached),
 					errors.Is(err, errors.ErrNotCachedRetry):
-					l.Debug(ctx, "cache miss (retry) for sleep",
-						slog.String("sleep_id", s.Id), err)
-					l.addSleepMiss(ctx, s.Id)
 					return nil, backoff.RetryAfter(l.config.cacheRetryInterval)
 				case errors.Is(err, errors.ErrNotFound):
 					return nil, backoff.Permanent(err)
@@ -382,19 +294,13 @@ func (l *logic) Sleep(ctx context.Context, s data.Sleep) (*data.Sleep, error) {
 			return sleep, nil
 		}, l.backoffRetryOptions...)
 		if err == nil {
-			l.Debug(ctx, "cache hit sleep read cache hit", slog.String("sleep_id", s.Id))
-			l.addSleepHit(ctx, s.Id)
 			return sleep, nil
 		}
 		if l.config.cacheNotFoundEnabled &&
 			(errors.Is(err, errors.ErrNotCached) ||
 				errors.Is(err, errors.ErrNotCachedRetry)) {
-			l.Debug(ctx, "cache hit (not found) for sleep", slog.String("sleep_id", s.Id))
-			l.addSleepHit(ctx, s.Id)
 			return nil, err
 		}
-		l.Debug(ctx, "cache miss (not found) for sleep", slog.String("sleep_id", s.Id))
-		l.addSleepMiss(ctx, s.Id)
 	}
 	sleep, err := l.sql.Sleep(ctx, s)
 	if err != nil {

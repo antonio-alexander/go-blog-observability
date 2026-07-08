@@ -3,7 +3,7 @@
 ## ----------------------------------------------------------------------
 
 golint_version=v1.51.2
-swagger_version=v0.29.0
+swagger_version=v0.36.5
 swagger_port = 8082
 
 env_file=.env # default env file

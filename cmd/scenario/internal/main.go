@@ -5,48 +5,12 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
-	"time"
 
-	"github.com/antonio-alexander/go-blog-observability/internal"
 	"github.com/antonio-alexander/go-blog-observability/internal/client"
-	"github.com/antonio-alexander/go-blog-observability/internal/data"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/logger"
-
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/antonio-alexander/go-blog-observability/internal/pkg/tracer"
+	"github.com/antonio-alexander/go-blog-observability/internal/scenario"
 )
-
-func generateToken(ctx context.Context, logger logger.Logger, envs map[string]string) (string, error) {
-	var privateSigningKeyMethod, privateSigningKey, privateSigningKeyFile string
-
-	userId := internal.GenerateId()
-	if s, ok := envs["USER_ID"]; ok {
-		userId = s
-	}
-	if s, ok := envs["AUTHZ_PRIVATE_SIGNING_KEY"]; ok {
-		privateSigningKey = s
-	}
-	if s, ok := envs["AUTHZ_PRIVATE_SIGNING_METHOD"]; ok {
-		privateSigningKeyMethod = s
-	}
-	if s, ok := envs["AUTHZ_PRIVATE_SIGNING_KEY_FILE"]; ok {
-		privateSigningKeyFile = s
-	}
-	authzPrivateSigningMethod := jwt.GetSigningMethod(privateSigningKeyMethod)
-	authzPrivateSigningKey, err := internal.GetPrivateSigningKey(privateSigningKeyMethod,
-		privateSigningKey, privateSigningKeyFile)
-	if err != nil {
-		return "", err
-	}
-	logger.Info(ctx, "generating token", slog.String("user_id", userId))
-	return jwt.NewWithClaims(authzPrivateSigningMethod, &data.AuthzClaims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			IssuedAt:  &jwt.NumericDate{Time: time.Now()},
-			ExpiresAt: &jwt.NumericDate{Time: time.Now().Add(time.Minute)},
-			ID:        internal.GenerateId(),
-		},
-		UserId: userId,
-	}).SignedString(authzPrivateSigningKey)
-}
 
 func Main(ctx context.Context, pwd string, args []string, envs map[string]string) error {
 	var wg sync.WaitGroup
@@ -57,11 +21,28 @@ func Main(ctx context.Context, pwd string, args []string, envs map[string]string
 	defer cancel()
 
 	//create logger
-	logger := logger.NewSlog()
-	if err := logger.Configure(envs); err != nil {
+	log := logger.NewSlog()
+	switch envs["LOGGER_TYPE"] {
+	case "open_telemetry":
+		log = logger.NewOpenTelemetry()
+	}
+	if err := log.Configure(envs); err != nil {
 		return err
 	}
-	if err := logger.Open(ctx); err != nil {
+	if err := log.Open(ctx); err != nil {
+		return err
+	}
+
+	//create traces
+	traces := tracer.NewNull()
+	switch envs["TRACER_TYPE"] {
+	case "open_telemetry":
+		traces = tracer.NewOpenTelemetry(log)
+	}
+	if err := traces.Configure(envs); err != nil {
+		return err
+	}
+	if err := traces.Open(ctx); err != nil {
 		return err
 	}
 
@@ -78,7 +59,7 @@ func Main(ctx context.Context, pwd string, args []string, envs map[string]string
 	clients := make([]client.Client, 0, nClients)
 	for range nClients {
 		//create client
-		client := client.NewClient(logger)
+		client := client.NewClient(log, traces)
 		if err := client.Configure(envs); err != nil {
 			return err
 		}
@@ -89,34 +70,28 @@ func Main(ctx context.Context, pwd string, args []string, envs map[string]string
 		clients = append(clients, client)
 	}
 
-	// generate token
-	token, err := generateToken(ctx, logger, envs)
-	if err != nil {
-		return err
-	}
-
 	// execute scenario
-	scenario := envs["SCENARIO"]
-	logger.Info(ctx, "executing scenario", slog.String("scenario", scenario))
-	switch scenario {
+	scene := envs["SCENARIO"]
+	log.Info(ctx, "executing scenario", slog.String("scenario", scene))
+	switch scene {
 	// TODO: largest input/output payloads
 	case "percentile_latency":
-		err = scenarioPercentileLatency(ctx, envs, logger, clients...)
+		err = scenario.ScenarioPercentileLatency(ctx, envs, log, clients...)
 	case "sustained_traffic":
-		err = scenarioSustainedTraffic(ctx, envs, logger, clients...)
+		err = scenario.ScenarioSustainedTraffic(ctx, envs, log, clients...)
 	case "stampeding_herd":
-		err = scenarioStampedingHerd(ctx, envs, logger, token, clients...)
+		err = scenario.ScenarioStampedingHerd(ctx, envs, log, clients...)
 	case "cache_not_found":
-		err = scenarioCacheNotFound(ctx, envs, logger, token, clients...)
+		err = scenario.ScenarioCacheNotFound(ctx, envs, log, clients...)
 	case "sleep_retry":
-		err = scenarioSleepRetry(ctx, envs, logger, clients...)
+		err = scenario.ScenarioSleepRetry(ctx, envs, log, clients...)
 	default:
-		logger.Error(ctx, "unsupported scenario", slog.String("scenario", scenario))
+		log.Error(ctx, "unsupported scenario", slog.String("scenario", scene))
 	}
 	cancel()
 	wg.Wait()
 	if err != nil {
-		logger.Error(ctx, "scenario failed", slog.String("scenario", scenario), err)
+		log.Error(ctx, "scenario failed", slog.String("scenario", scene), err)
 	}
 	return nil
 }

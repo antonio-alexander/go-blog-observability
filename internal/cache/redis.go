@@ -7,17 +7,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/antonio-alexander/go-blog-observability/internal"
 	"github.com/antonio-alexander/go-blog-observability/internal/data"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/logger"
+	"github.com/antonio-alexander/go-blog-observability/internal/pkg/metrics"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/tracer"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -34,6 +37,10 @@ const (
 
 type redisCache struct {
 	sync.WaitGroup
+	logger.Logger
+	tracer.Tracer
+	metrics.Metrics
+	*metrics.Int64CounterHelper
 	redisClient *redis.Client
 	config      struct {
 		address                 string
@@ -54,8 +61,7 @@ type redisCache struct {
 	}
 	ctx       context.Context
 	ctxCancel context.CancelFunc
-	logger.Logger
-	tracer.Tracer
+	opened    atomic.Bool
 }
 
 func NewRedis(parameters ...any) interface {
@@ -64,11 +70,15 @@ func NewRedis(parameters ...any) interface {
 	internal.Clearer
 	Cache
 } {
-	c := &redisCache{}
+	c := &redisCache{
+		Int64CounterHelper: metrics.NewInt64CounterHelper(),
+	}
 	for _, parameter := range parameters {
 		switch p := parameter.(type) {
 		case tracer.Tracer:
 			c.Tracer = p
+		case metrics.Metrics:
+			c.Metrics = p
 		case logger.Logger:
 			c.Logger = p
 		}
@@ -78,16 +88,12 @@ func NewRedis(parameters ...any) interface {
 
 func (c *redisCache) launchPruneSetRead() {
 	started := make(chan struct{})
-	c.Add(1)
 	c.Go(func() {
-		defer c.Done()
-
 		pruneEmployeesSetFx := func() {
-			c.Lock(hashKeyInProgressEmployeesMutex)
-			defer c.Unlock(hashKeyInProgressEmployeesMutex)
-
 			var fieldsToDelete []string
 
+			c.Lock(hashKeyInProgressEmployeesMutex)
+			defer c.Unlock(hashKeyInProgressEmployeesMutex)
 			hscanIter := c.redisClient.HScan(c.ctx, hashKeyInProgressEmployees, 0, "*", 0).Iterator()
 			for hscanIter.Next(c.ctx) {
 				field := hscanIter.Val()
@@ -142,16 +148,12 @@ func (c *redisCache) launchPruneSetRead() {
 
 func (c *redisCache) launchPruneNotFound() {
 	started := make(chan struct{})
-	c.Add(1)
-	go func() {
-		defer c.Done()
-
+	c.Go(func() {
 		pruneFx := func() {
-			c.Lock(hashKeyNotFoundMutex)
-			defer c.Unlock(hashKeyNotFoundMutex)
-
 			var fieldsToDelete []string
 
+			c.Lock(hashKeyNotFoundMutex)
+			defer c.Unlock(hashKeyNotFoundMutex)
 			hscanIter := c.redisClient.HScan(c.ctx, hashKeyNotFound, 0, "*", 0).Iterator()
 			for hscanIter.Next(c.ctx) {
 				field := hscanIter.Val()
@@ -178,7 +180,7 @@ func (c *redisCache) launchPruneNotFound() {
 				pruneFx()
 			}
 		}
-	}()
+	})
 	<-started
 }
 
@@ -268,53 +270,81 @@ func (c *redisCache) Configure(envs map[string]string) error {
 		c.config.password = redisPassword
 	}
 	if redisDatabase, ok := envs["REDIS_DATABASE"]; ok {
-		i, _ := strconv.ParseInt(redisDatabase, 10, 64)
-		c.config.database = int(i)
+		i, err := strconv.ParseInt(redisDatabase, 10, 64)
+		if err == nil {
+			c.config.database = int(i)
+		}
 	}
 	if redisTimeout, ok := envs["REDIS_TIMEOUT"]; ok {
-		i, _ := strconv.ParseInt(redisTimeout, 10, 64)
-		c.config.timeout = time.Duration(i) * time.Second
+		i, err := strconv.ParseInt(redisTimeout, 10, 64)
+		if err == nil {
+			c.config.timeout = time.Duration(i) * time.Second
+		}
 	}
 	if s, ok := envs["CACHE_REDIS_MUTEX_EXPIRATION"]; ok {
-		mutexExpiration, _ := strconv.Atoi(s)
-		c.config.mutexExpiration = time.Second * time.Duration(mutexExpiration)
+		i, err := strconv.Atoi(s)
+		if err == nil {
+			c.config.mutexExpiration = time.Second * time.Duration(i)
+		}
 	}
 	if s, ok := envs["REDIS_MUTEX_RETRY_INTERVAL"]; ok {
-		mutexRetryInterval, _ := strconv.Atoi(s)
-		c.config.mutexRetryInterval = time.Second * time.Duration(mutexRetryInterval)
+		i, err := strconv.Atoi(s)
+		if err != nil {
+			c.config.mutexRetryInterval = time.Second * time.Duration(i)
+		}
 	}
 	if s, ok := envs["CACHE_PRUNE_INTERVAL"]; ok {
-		inProgressPruneInterval, _ := strconv.Atoi(s)
-		c.config.inProgressPruneInterval = time.Second * time.Duration(inProgressPruneInterval)
+		i, err := strconv.Atoi(s)
+		if err == nil {
+			c.config.inProgressPruneInterval = time.Second * time.Duration(i)
+		}
 	}
 	if s, ok := envs["CACHE_SET_READ_TTL"]; ok {
-		inProgressTTL, _ := strconv.Atoi(s)
-		c.config.inProgressTTL = time.Second * time.Duration(inProgressTTL)
+		i, err := strconv.Atoi(s)
+		if err == nil {
+			c.config.inProgressTTL = time.Second * time.Duration(i)
+		}
 	}
 	if inProgressEnabled, ok := envs["CACHE_ENABLE_IN_PROGRESS"]; ok {
-		c.config.inProgressEnabled, _ = strconv.ParseBool(inProgressEnabled)
+		b, err := strconv.ParseBool(inProgressEnabled)
+		if err == nil {
+			c.config.inProgressEnabled = b
+		}
 	}
 	if s, ok := envs["CACHE_NOT_FOUND_PRUNE_INTERVAL"]; ok {
-		notFoundPruneInterval, _ := strconv.Atoi(s)
-		c.config.notFoundPruneInterval = time.Second * time.Duration(notFoundPruneInterval)
+		i, err := strconv.Atoi(s)
+		if err == nil {
+			c.config.notFoundPruneInterval = time.Second * time.Duration(i)
+		}
 	}
 	if c.config.notFoundPruneInterval <= 0 {
 		c.config.notFoundPruneInterval = 10 * time.Second
 	}
 	if s, ok := envs["CACHE_NOT_FOUND_TTL"]; ok {
-		notFoundTTL, _ := strconv.Atoi(s)
-		c.config.notFoundTTL = time.Second * time.Duration(notFoundTTL)
+		i, err := strconv.Atoi(s)
+		if err == nil {
+			c.config.notFoundTTL = time.Second * time.Duration(i)
+		}
 	}
 	if notFoundEnabled, ok := envs["CACHE_NOT_FOUND_ENABLED"]; ok {
-		c.config.notFoundEnabled, _ = strconv.ParseBool(notFoundEnabled)
+		b, err := strconv.ParseBool(notFoundEnabled)
+		if err == nil {
+			c.config.notFoundEnabled = b
+		}
+
 	}
 	if mutexDisabled, ok := envs["CACHE_REDIS_MUTEX_DISABLED"]; ok {
-		c.config.mutexDisabled, _ = strconv.ParseBool(mutexDisabled)
+		b, err := strconv.ParseBool(mutexDisabled)
+		if err == nil {
+			c.config.mutexDisabled = b
+		}
 	}
 	c.config.cacheTTL = 5 * time.Second
 	if s, ok := envs["CACHE_TTL"]; ok {
-		i, _ := strconv.ParseInt(s, 10, 64)
-		c.config.cacheTTL = time.Duration(i) * time.Second
+		i, err := strconv.ParseInt(s, 10, 64)
+		if err == nil {
+			c.config.cacheTTL = time.Duration(i) * time.Second
+		}
 	}
 	return nil
 }
@@ -336,6 +366,13 @@ func (c *redisCache) setExpiration() error {
 }
 
 func (c *redisCache) Open(ctx context.Context) error {
+	if c.opened.Load() {
+		return nil
+	}
+	meter := c.Meter(packageName)
+	if err := createCounters(meter, c.Int64CounterHelper); err != nil {
+		return err
+	}
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     net.JoinHostPort(c.config.address, c.config.port),
 		Password: c.config.password,
@@ -355,47 +392,63 @@ func (c *redisCache) Open(ctx context.Context) error {
 	if c.config.notFoundEnabled {
 		c.launchPruneNotFound()
 	}
+	c.opened.Store(true)
 	return nil
 }
 
 func (c *redisCache) Close(ctx context.Context) {
-	if c.config.inProgressEnabled {
-		c.ctxCancel()
-		c.Wait()
+	if !c.opened.Load() {
+		return
 	}
+	c.opened.Store(false)
+	c.ctxCancel()
+	c.Wait()
 	if err := c.redisClient.Close(); err != nil {
 		c.Error(ctx, "cache unable to close redis client", err)
 	}
+	c.Int64CounterHelper.Close(ctx)
 }
 
 func (c *redisCache) Clear(ctx context.Context) error {
-	ctx, span := c.Start(ctx, "redis.Clear")
+	if !c.opened.Load() {
+		return ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.clear")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, c.config.timeout)
 	defer cancel()
 	if _, err := c.redisClient.Del(ctx, hashKeyEmployees).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if _, err := c.redisClient.Del(ctx, hashKeyEmployeesSearch).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if _, err := c.redisClient.Del(ctx, hashKeyInProgressEmployees).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if _, err := c.redisClient.Del(ctx, hashKeyInProgressEmployeesMutex).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if _, err := c.redisClient.Del(ctx, hashKeyNotFound).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if _, err := c.redisClient.Del(ctx, hashKeyNotFoundMutex).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	return nil
 }
 
 func (c *redisCache) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
-	ctx, span := c.Start(ctx, "redis.EmployeeRead",
+	if !c.opened.Load() {
+		return nil, ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.employee_read",
 		trace.WithAttributes(attribute.Int64("emp_no", empNo)))
 	defer span.End()
 	key := fmt.Sprint(empNo)
@@ -405,10 +458,15 @@ func (c *redisCache) EmployeeRead(ctx context.Context, empNo int64) (*data.Emplo
 	if err != nil {
 		switch {
 		default:
+			span.RecordError(err)
 			return nil, err
 		case errors.Is(err, redis.Nil):
 			if !c.config.inProgressEnabled {
-				return nil, ErrEmployeeNotCached(empNo)
+				c.Int64CounterHelper.Add(ctx, counterNameEmployeeCacheMiss, 1,
+					metric.WithAttributes(attribute.Int64("emp_no", empNo)))
+				err := ErrEmployeeNotCached(empNo)
+				span.RecordError(err)
+				return nil, err
 			}
 			c.Lock(hashKeyInProgressEmployeesMutex)
 			defer c.Unlock(hashKeyInProgressEmployeesMutex)
@@ -416,37 +474,59 @@ func (c *redisCache) EmployeeRead(ctx context.Context, empNo int64) (*data.Emplo
 			result, err := c.redisClient.HSetNX(ctx, hashKeyInProgressEmployees, key,
 				fmt.Sprint(tNow)).Result()
 			if err != nil {
-				return nil, fmt.Errorf("error while setting employee (%s) read in progress: %w", key, err)
+				err := fmt.Errorf("error while setting employee (%s) read in progress: %w", key, err)
+				span.RecordError(err)
+				return nil, err
 			}
 			if !result {
-				return nil, ErrEmployeeReadAlreadySet(empNo)
+				c.Int64CounterHelper.Add(ctx, counterNameEmployeeCacheInProgressAlreadySet, 1,
+					metric.WithAttributes(attribute.Int64("emp_no", empNo)))
+				err := ErrEmployeeReadAlreadySet(empNo)
+				span.RecordError(err)
+				return nil, err
 			}
-			return nil, ErrEmployeeReadSet(empNo)
+			c.Int64CounterHelper.Add(ctx, counterNameEmployeeCacheInProgressSet, 1,
+				metric.WithAttributes(attribute.Int64("emp_no", empNo)))
+			err = ErrEmployeeReadSet(empNo)
+			span.RecordError(err)
+			return nil, err
 		}
 	}
 	employee := &data.Employee{}
 	if err := employee.UnmarshalBinary([]byte(value)); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
+	c.Int64CounterHelper.Add(ctx, counterNameEmployeeCacheHit, 1,
+		metric.WithAttributes(attribute.Int64("emp_no", empNo)))
 	return employee, nil
 }
 
 func (c *redisCache) EmployeesRead(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
-	ctx, span := c.Start(ctx, "redis.EmployeesRead")
+	if !c.opened.Load() {
+		return nil, ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.employees_read")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, c.config.timeout)
 	defer cancel()
 	searchKey, err := search.ToKey()
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	value, err := c.redisClient.HGet(ctx, hashKeyEmployeesSearch, searchKey).Result()
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	if searchKey == "" || value == "" {
 		if !c.config.inProgressEnabled {
-			return nil, ErrEmployeeSearchNotCached
+			c.Int64CounterHelper.Add(ctx, counterNameEmployeeCacheMiss, 1,
+				metric.WithAttributes(attribute.String("emp_search_key", searchKey)))
+			err := ErrEmployeeSearchNotCached
+			span.RecordError(err)
+			return nil, err
 		}
 		c.Lock(hashKeyInProgressEmployeesMutex)
 		defer c.Unlock(hashKeyInProgressEmployeesMutex)
@@ -454,11 +534,19 @@ func (c *redisCache) EmployeesRead(ctx context.Context, search data.EmployeeSear
 		result, err := c.redisClient.HSetNX(ctx, hashKeyInProgressEmployees, searchKey,
 			fmt.Sprint(tNow)).Result()
 		if err != nil {
-			return nil, fmt.Errorf("error while setting employee search in progress: %w", err)
+			err := fmt.Errorf("error while setting employee search in progress: %w", err)
+			span.RecordError(err)
+			return nil, err
 		}
 		if !result {
-			return nil, ErrEmployeesSearchAlreadySet
+			c.Int64CounterHelper.Add(ctx, counterNameEmployeeCacheInProgressAlreadySet, 1,
+				metric.WithAttributes(attribute.String("emp_search_key", searchKey)))
+			err := ErrEmployeesSearchAlreadySet
+			span.RecordError(err)
+			return nil, err
 		}
+		c.Int64CounterHelper.Add(ctx, counterNameEmployeeCacheInProgressSet, 1,
+			metric.WithAttributes(attribute.String("emp_search_key", searchKey)))
 		return nil, ErrEmployeesSearchSet
 	}
 	empNos := strings.Split(value, ",")
@@ -466,40 +554,52 @@ func (c *redisCache) EmployeesRead(ctx context.Context, search data.EmployeeSear
 	for _, empNo := range empNos {
 		value, err := c.redisClient.HGet(ctx, hashKeyEmployees, fmt.Sprint(empNo)).Result()
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		employee := &data.Employee{}
 		if err := employee.UnmarshalBinary([]byte(value)); err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		employees = append(employees, employee)
 	}
+	c.Int64CounterHelper.Add(ctx, counterNameEmployeeCacheHit, 1,
+		metric.WithAttributes(attribute.String("emp_search_key", searchKey)))
 	return employees, nil
 }
 
 func (c *redisCache) EmployeesWrite(ctx context.Context, search data.EmployeeSearch, employees ...*data.Employee) error {
-	ctx, span := c.Start(ctx, "redis.EmployeesWrite")
+	if !c.opened.Load() {
+		return ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.employees_write")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, c.config.timeout)
 	defer cancel()
 	searchKey, err := search.ToKey()
 	if err != nil {
-		return fmt.Errorf("unable to convert search key: %w", err)
+		err := fmt.Errorf("unable to convert search key: %w", err)
+		span.RecordError(err)
+		return err
 	}
 	empNos := make([]string, 0, len(employees))
 	for _, employee := range employees {
 		bytes, err := employee.MarshalBinary()
 		if err != nil {
+			span.RecordError(err)
 			return err
 		}
 		if _, err := c.redisClient.HSet(ctx, hashKeyEmployees,
 			fmt.Sprint(employee.EmpNo), string(bytes)).Result(); err != nil {
+			span.RecordError(err)
 			return err
 		}
 		empNos = append(empNos, fmt.Sprint(employee.EmpNo))
 	}
 	if _, err := c.redisClient.HSet(ctx, hashKeyEmployeesSearch, searchKey,
 		strings.Join(empNos, ",")).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if c.config.inProgressEnabled {
@@ -512,19 +612,21 @@ func (c *redisCache) EmployeesWrite(ctx context.Context, search data.EmployeeSea
 }
 
 func (c *redisCache) EmployeesDelete(ctx context.Context, e ...int64) error {
-	ctx, span := c.Start(ctx, "redis.EmployeesDelete")
+	if !c.opened.Load() {
+		return ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.employees_delete")
 	defer span.End()
-
-	var empNos []string
-
 	if len(e) <= 0 {
 		return nil
 	}
+	empNos := make([]string, 0, len(e))
 	for _, empNo := range e {
 		empNos = append(empNos, fmt.Sprint(empNo))
 	}
 	if _, err := c.redisClient.HDel(ctx, hashKeyEmployees,
 		empNos...).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if c.config.inProgressEnabled {
@@ -537,44 +639,68 @@ func (c *redisCache) EmployeesDelete(ctx context.Context, e ...int64) error {
 }
 
 func (c *redisCache) EmployeesNotFoundWrite(ctx context.Context, search data.EmployeeSearch, empNos ...int64) error {
-	ctx, span := c.Start(ctx, "redis.EmployeesNotFoundWrite")
+	if !c.opened.Load() {
+		return ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.employees_not_found_write")
 	defer span.End()
 	if !c.config.notFoundEnabled {
 		return nil
 	}
 	searchKey, err := search.ToKey()
 	if err != nil {
-		return fmt.Errorf("unable to convert search key: %w", err)
+		err := fmt.Errorf("unable to convert search key: %w", err)
+		span.RecordError(err)
+		return err
 	}
 	c.Lock(hashKeyNotFoundMutex)
 	defer c.Unlock(hashKeyNotFoundMutex)
 	tNow := time.Now().UnixNano()
 	if _, err := c.redisClient.HSetNX(ctx, hashKeyNotFound, searchKey,
 		fmt.Sprint(tNow)).Result(); err != nil {
-		return fmt.Errorf("error while setting employee search not found: %w", err)
+		err := fmt.Errorf("error while setting employee search not found: %w", err)
+		span.RecordError(err)
+		return err
 	}
 	for _, empNo := range empNos {
 		if _, err := c.redisClient.HSetNX(ctx, hashKeyNotFound, fmt.Sprint(empNo),
 			fmt.Sprint(tNow)).Result(); err != nil {
-			return fmt.Errorf("error while setting employee not found: %w", err)
+			err := fmt.Errorf("error while setting employee not found: %w", err)
+			span.RecordError(err)
+			return err
 		}
 	}
 	return nil
 }
 
 func (c *redisCache) SleepRead(ctx context.Context, sleepId string) (*data.Sleep, error) {
-	ctx, span := c.Start(ctx, "redis.SleepRead")
+	if !c.opened.Load() {
+		return nil, ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.sleep_read")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, c.config.timeout)
 	defer cancel()
+	if sleepId == "" {
+		c.Int64CounterHelper.Add(ctx, counterNameSleepCacheMiss, 1,
+			metric.WithAttributes(attribute.String("sleep_id", sleepId)))
+		err := ErrSleepNotCached(sleepId)
+		span.RecordError(err)
+		return nil, err
+	}
 	value, err := c.redisClient.HGet(ctx, hashKeySleep, sleepId).Result()
 	if err != nil {
 		switch {
 		default:
+			span.RecordError(err)
 			return nil, err
 		case errors.Is(err, redis.Nil):
 			if !c.config.inProgressEnabled {
-				return nil, ErrSleepNotCached(sleepId)
+				c.Int64CounterHelper.Add(ctx, counterNameSleepCacheMiss, 1,
+					metric.WithAttributes(attribute.String("sleep_id", sleepId)))
+				err := ErrSleepNotCached(sleepId)
+				span.RecordError(err)
+				return nil, err
 			}
 			c.Lock(hashKeyInProgressSleepsMutex)
 			defer c.Unlock(hashKeyInProgressSleepsMutex)
@@ -582,32 +708,51 @@ func (c *redisCache) SleepRead(ctx context.Context, sleepId string) (*data.Sleep
 			result, err := c.redisClient.HSetNX(ctx, hashKeyInProgressSleeps, sleepId,
 				fmt.Sprint(tNow)).Result()
 			if err != nil {
-				return nil, fmt.Errorf("error while setting sleep (%s) read in progress: %w", sleepId, err)
+				err := fmt.Errorf("error while setting sleep (%s) read in progress: %w", sleepId, err)
+				span.RecordError(err)
+				return nil, err
 			}
 			if !result {
-				return nil, ErrSleepReadAlreadySet(sleepId)
+				c.Int64CounterHelper.Add(ctx, counterNameSleepCacheInProgressAlreadySet, 1,
+					metric.WithAttributes(attribute.String("sleep_id", sleepId)))
+				err := ErrSleepReadAlreadySet(sleepId)
+				span.RecordError(err)
+				return nil, err
 			}
-			return nil, ErrSleepReadSet(sleepId)
+			c.Int64CounterHelper.Add(ctx, counterNameSleepCacheInProgressSet, 1,
+				metric.WithAttributes(attribute.String("sleep_id", sleepId)))
+			err = ErrSleepReadSet(sleepId)
+			span.RecordError(err)
+			return nil, err
 		}
 	}
 	sleep := &data.Sleep{}
 	if err := sleep.UnmarshalBinary([]byte(value)); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
+	c.Int64CounterHelper.Add(ctx, counterNameSleepCacheHit, 1,
+		metric.WithAttributes(attribute.String("sleep_id", sleepId)))
+	time.Sleep(time.Duration(sleep.Duration)) //sleep to simulate database sleeping (but in parallel)
 	return sleep, nil
 }
 
 func (c *redisCache) SleepWrite(ctx context.Context, sleep *data.Sleep) error {
-	ctx, span := c.Start(ctx, "redis.SleepWrite")
+	if !c.opened.Load() {
+		return ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.sleep_write")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, c.config.timeout)
 	defer cancel()
 	bytes, err := sleep.MarshalBinary()
 	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if _, err := c.redisClient.HSet(ctx, hashKeySleep,
 		sleep.Id, string(bytes)).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if c.config.inProgressEnabled {
@@ -619,13 +764,17 @@ func (c *redisCache) SleepWrite(ctx context.Context, sleep *data.Sleep) error {
 }
 
 func (c *redisCache) SleepsDelete(ctx context.Context, sleepIds ...string) error {
-	ctx, span := c.Start(ctx, "redis.SleepsDelete")
+	if !c.opened.Load() {
+		return ErrCacheNotOpened
+	}
+	ctx, span := c.Start(ctx, "cache.sleeps_delete")
 	defer span.End()
 	if len(sleepIds) <= 0 {
 		return nil
 	}
 	if _, err := c.redisClient.HDel(ctx, hashKeyEmployees,
 		sleepIds...).Result(); err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if c.config.inProgressEnabled {

@@ -27,17 +27,13 @@ services:
   otel-lgtm:
     image: grafana/otel-lgtm:latest
     container_name: otel-lgtm
+    restart: always
     ports:
       - "3000:3000" # Grafana UI
       - "4317:4317" # OTLP gRPC receiver
       - "4318:4318" # OTLP HTTP receiver
     volumes:
       - otel-lgtm-data:/data
-    healthcheck:
-      test: ["CMD", "/opt/health-check.sh"]
-      interval: 1m
-      timeout: 10s
-      retries: 10
     environment:
       OTEL_EXPORTER_OTLP_INSECURE: true
 
@@ -52,7 +48,7 @@ services:
       mysql:
         condition: service_started
     ports:
-      - "8081:8080"
+      - "8080:8080"
     build:
       context: ./
       dockerfile: ./cmd/service/Dockerfile
@@ -62,8 +58,9 @@ services:
         GO_ARM: ${GO_ARM:-7}
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-debug}
-      TRACE_ENABLE_STDOUT: ${TRACE_ENABLE_STDOUT:-false}
-      METRICS_ENABLE_STDOUT: ${METRICS_ENABLE_STDOUT:-false}
+      LOGGER_TYPE: ${LOGGER_TYPE:-open_telemetry}
+      METRIC_TYPE: ${METRIC_TYPE:-open_telemetry}
+      TRACER_TYPE: ${TRACER_TYPE:-open_telemetry}
       DATABASE_HOST: ${DATABASE_HOST:-mysql}
       DATABASE_PORT: ${DATABASE_PORT:-3306}
       DATABASE_NAME: ${DATABASE_NAME:-employees}
@@ -71,14 +68,17 @@ services:
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-mysql}
       DATABASE_QUERY_TIMEOUT: ${DATABASE_QUERY_TIMEOUT:-10}
       DATABASE_PARSE_TIME: ${DATABASE_PARSE_TIME:-true}
+      DATABASE_MAX_OPEN_CONNS: ${DATABASE_MAX_OPEN_CONNS:-1}
+      DATABASE_MAX_IDLE_CONNS: ${DATABASE_MAX_IDLE_CONNS:-1}
       SERVICE_ADDRESS: ${SERVICE_ADDRESS}
       SERVICE_PORT: ${SERVICE_PORT:-8080}
       SERVICE_PROTOCOL: ${SERVICE_PROTOCOL:-http}
       SERVICE_TIMEOUT: ${SERVICE_TIMEOUT}
       SERVICE_CORS_DISABLED: ${SERVICE_CORS_DISABLED}
-      SERVICE_CORS_ALLOWED_ORIGINS: ${SERVICE_CORS_ALLOWED_ORIGINS:-*}
-      SERVICE_CORS_ALLOWED_METHODS: ${SERVICE_CORS_ALLOWED_METHODS:-POST,PUT,GET,DELETE,PATCH}
-      SERVICE_CORS_ALLOWED_HEADERS: ${SERVICE_CORS_ALLOWED_HEADERS:-Correlation-Id,Authorization}
+      SERVICE_CORS_DEBUG: ${SERVICE_CORS_DEBUG}
+      SERVICE_CORS_ALLOWED_ORIGINS: ${SERVICE_CORS_ALLOWED_ORIGINS}
+      SERVICE_CORS_ALLOWED_METHODS: ${SERVICE_CORS_ALLOWED_METHODS:-POST,PUT,GET,DELETE,PATCH,QUERY}
+      SERVICE_CORS_ALLOWED_HEADERS: ${SERVICE_CORS_ALLOWED_HEADERS:-Correlation-Id,Authorization,Content-Type}
       SSL_CA_FILE: ${SSL_CA_FILE}
       SSL_KEY_FILE: ${SSL_KEY_FILE}
       SSL_CRT_FILE: ${SSL_CRT_FILE}
@@ -105,10 +105,15 @@ services:
       AUTHZ_PUBLIC_SIGNING_METHOD: ${AUTHZ_PUBLIC_SIGNING_METHOD:-HS256}
       AUTHZ_PUBLIC_SIGNING_KEY: ${AUTHZ_PUBLIC_SIGNING_KEY:-secret}
       AUTHZ_PUBLIC_SIGNING_KEY_FILE: ${AUTHZ_PUBLIC_SIGNING_KEY_FILE}
+      AUTHZ_PRIVATE_SIGNING_METHOD: ${AUTHZ_PRIVATE_SIGNING_METHOD:-HS256}
+      AUTHZ_PRIVATE_SIGNING_KEY: ${AUTHZ_PRIVATE_SIGNING_KEY:-secret}
+      AUTHZ_PRIVATE_SIGNING_KEY_FILE: ${AUTHZ_PRIVATE_SIGNING_KEY_FILE}
       AUTHZ_USER_ID: ${AUTHZ_USER_ID}
       REGO_COMPILE_FILENAME: ${REGO_COMPILE_FILENAME:-./opa/compilation}
       EVAL_COMPILE_FILENAME: ${EVAL_COMPILE_FILENAME:-./opa/evaluation}
       OTEL_PROTOCOL: ${OTEL_PROTOCOL:-http}
       OTEL_HOST: ${OTEL_HOST:-otel-lgtm:4318}
+      OTEL_EXPORT_INTERVAL: ${OTEL_EXPORT_INTERVAL:-1}
+
 volumes:
   otel-lgtm-data:

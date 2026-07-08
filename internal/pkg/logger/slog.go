@@ -112,3 +112,16 @@ func (l *loggerSlog) Warn(ctx context.Context, msg string, items ...any) {
 	attrs = append(attrs, getAttributes(items)...)
 	l.LogAttrs(ctx, Warn, msg, attrs...)
 }
+
+func (l *loggerSlog) Trace(ctx context.Context, msg string, items ...any) {
+	var attrs []slog.Attr
+
+	if l.config.enableSprintf && hasFormatIdentifiers(msg) {
+		msg = fmt.Sprintf(msg, items...)
+	}
+	if ctxAttrs := pkgcontext.AttributesFrom(ctx); len(ctxAttrs) > 0 {
+		attrs = append(attrs, ctxAttrs...)
+	}
+	attrs = append(attrs, getAttributes(items)...)
+	l.LogAttrs(ctx, Trace, msg, attrs...)
+}

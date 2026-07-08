@@ -6,7 +6,7 @@ import (
 )
 
 func Is(err, target error) bool {
-	return errors.Is(err, err)
+	return errors.Is(err, target)
 }
 
 func AsType[E error](err error) (E, bool) {

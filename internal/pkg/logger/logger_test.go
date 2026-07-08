@@ -6,11 +6,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/logger"
-
-	"github.com/google/uuid"
 )
 
 var envs = map[string]string{
@@ -42,7 +41,7 @@ func TestOpenTelemetry(t *testing.T) {
 	defer logger.Close(ctx)
 
 	//execute logging
-	id := uuid.Must(uuid.NewRandom()).String()
+	id := uuid.New().String()
 	t.Log(id)
 
 	logger.Error(ctx, "Error Hello, World!",
@@ -85,7 +84,7 @@ func TestSlog(t *testing.T) {
 	defer logger.Close(ctx)
 
 	//execute logging
-	id := uuid.Must(uuid.NewRandom()).String()
+	id := uuid.New().String()
 	t.Log(id)
 
 	logger.Error(ctx, "Error Hello, World!",

@@ -15,8 +15,7 @@ import (
 )
 
 var envs = map[string]string{
-	"OTEL_LOG_LEVEL":      "info",
-	"TRACE_ENABLE_STDOUT": "true",
+	"OTEL_LOG_LEVEL": "info",
 }
 
 func init() {

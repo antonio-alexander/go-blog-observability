@@ -13,9 +13,12 @@ import (
 	"github.com/antonio-alexander/go-blog-observability/internal/data"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/logger"
+	"github.com/antonio-alexander/go-blog-observability/internal/pkg/metrics"
+	"github.com/antonio-alexander/go-blog-observability/internal/pkg/tracer"
+	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
 	"github.com/XSAM/otelsql"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
 	_ "github.com/go-sql-driver/mysql" //import for driver support
 )
@@ -23,19 +26,24 @@ import (
 const tableEmployees = "employees"
 
 type mySql struct {
+	logger.Logger
+	tracer.Tracer
+	metrics.Metrics
 	config struct {
-		Hostname       string        `json:"hostname"`
-		Port           string        `json:"port"`
-		Username       string        `json:"username"`
-		Password       string        `json:"password"`
-		Database       string        `json:"database"`
-		ConnectTimeout time.Duration `json:"connect_timeout"`
-		QueryTimeout   time.Duration `json:"query_timeout"`
-		ParseTime      bool          `json:"parse_time"`
+		Hostname       string
+		Port           string
+		Username       string
+		Password       string
+		Database       string
+		ConnectTimeout time.Duration
+		QueryTimeout   time.Duration
+		ParseTime      bool
+		MaxOpenConns   int
+		MaxIdleConns   int
 	}
 	*sql.DB
-	logger.Logger
-	opened atomic.Bool
+	metricRegistration metric.Registration
+	opened             atomic.Bool
 }
 
 func New(parameters ...any) interface {
@@ -46,6 +54,10 @@ func New(parameters ...any) interface {
 	m := &mySql{}
 	for _, parameter := range parameters {
 		switch v := parameter.(type) {
+		case tracer.Tracer:
+			m.Tracer = v
+		case metrics.Metrics:
+			m.Metrics = v
 		case logger.Logger:
 			m.Logger = v
 		}
@@ -69,33 +81,61 @@ func (s *mySql) Configure(envs map[string]string) error {
 	if password := envs["DATABASE_PASSWORD"]; password != "" {
 		s.config.Password = password
 	}
-	if _, ok := envs["DATABASE_QUERY_TIMEOUT"]; ok {
-		i, _ := strconv.ParseInt(envs["DATABASE_QUERY_TIMEOUT"], 10, 64)
-		s.config.QueryTimeout = time.Duration(i) * time.Second
+	if queryTimeout, ok := envs["DATABASE_QUERY_TIMEOUT"]; ok {
+		i, err := strconv.ParseInt(queryTimeout, 10, 64)
+		if err == nil {
+			s.config.QueryTimeout = time.Duration(i) * time.Second
+		}
 	}
-	if _, ok := envs["DATABASE_PARSE_TIME"]; ok {
-		s.config.ParseTime, _ = strconv.ParseBool(envs["DATABASE_PARSE_TIME"])
+	if parseTime, ok := envs["DATABASE_PARSE_TIME"]; ok {
+		b, err := strconv.ParseBool(parseTime)
+		if err == nil {
+			s.config.ParseTime = b
+		}
+	}
+	if maxConns, ok := envs["DATABASE_MAX_OPEN_CONNS"]; ok {
+		i, err := strconv.Atoi(maxConns)
+		if err == nil {
+			s.config.MaxOpenConns = i
+		}
+	}
+	if maxIdleConns, ok := envs["DATABASE_MAX_IDLE_CONNS"]; ok {
+		i, err := strconv.Atoi(maxIdleConns)
+		if err == nil {
+			s.config.MaxIdleConns = i
+		}
 	}
 	return nil
 }
 
 func (s *mySql) Open(ctx context.Context) error {
+	opts := []otelsql.Option{
+		otelsql.WithAttributes(semconv.DBSystemMySQL),
+		otelsql.WithSpanOptions(otelsql.SpanOptions{Ping: false}),
+	}
+	if meterProvider := s.MeterProvider(); meterProvider != nil {
+		opts = append(opts, otelsql.WithMeterProvider(meterProvider))
+	}
+	if tracerProvider := s.TracerProvider(); tracerProvider != nil {
+		opts = append(opts, otelsql.WithTracerProvider(tracerProvider))
+	}
 	dataSourceName := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=%t",
 		s.config.Username, s.config.Password, s.config.Hostname,
 		s.config.Port, s.config.Database, s.config.ParseTime)
-	db, err := otelsql.Open("mysql", dataSourceName,
-		otelsql.WithAttributes(semconv.DBSystemMySQL),
-		// otelsql.WithMeterProvider(),
-		// otelsql.WithTracerProvider(),
-		otelsql.WithSpanOptions(otelsql.SpanOptions{Ping: false}),
-	)
+	db, err := otelsql.Open("mysql", dataSourceName, opts...)
+	if err != nil {
+		return err
+	}
+	db.SetMaxOpenConns(s.config.MaxOpenConns)
+	db.SetMaxIdleConns(s.config.MaxIdleConns)
+	metricRegistration, err := otelsql.RegisterDBStatsMetrics(db)
 	if err != nil {
 		return err
 	}
 	if err := db.Ping(); err != nil {
 		return err
 	}
-	s.DB = db
+	s.metricRegistration, s.DB = metricRegistration, db
 	s.opened.Store(true)
 	return nil
 }
@@ -103,6 +143,9 @@ func (s *mySql) Open(ctx context.Context) error {
 func (s *mySql) Close(ctx context.Context) {
 	if !s.opened.Load() {
 		return
+	}
+	if err := s.metricRegistration.Unregister(); err != nil {
+		s.Error(ctx, "unable to unregister sql metrics", err)
 	}
 	if err := s.DB.Close(); err != nil {
 		s.Error(ctx, "unable to close sql", err)
@@ -113,6 +156,8 @@ func (s *mySql) EmployeeCreate(ctx context.Context, employeePartial data.Employe
 	var columns, values []string
 	var args []any
 
+	ctx, span := s.Start(ctx, "sql.employee_create")
+	defer span.End()
 	if employeePartial.BirthDate != nil {
 		args = append(args, time.Unix(*employeePartial.BirthDate, 0))
 		columns = append(columns, "birth_date")
@@ -140,6 +185,7 @@ func (s *mySql) EmployeeCreate(ctx context.Context, employeePartial data.Employe
 	}
 	empNo, err := findEmpNo(ctx, s.DB)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	args = append(args, empNo)
@@ -148,12 +194,20 @@ func (s *mySql) EmployeeCreate(ctx context.Context, employeePartial data.Employe
 	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", tableEmployees,
 		strings.Join(columns, ","), strings.Join(values, ","))
 	if _, err := s.ExecContext(ctx, query, args...); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
-	return s.EmployeeRead(ctx, empNo)
+	employee, err := s.EmployeeRead(ctx, empNo)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (s *mySql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, error) {
+	ctx, span := s.Start(ctx, "sql.employee_read")
+	defer span.End()
 	query := fmt.Sprintf(`SELECT emp_no, birth_date, first_name, last_name,
 		gender, hire_date FROM %s WHERE emp_no = ?;`,
 		tableEmployees)
@@ -164,7 +218,9 @@ func (s *mySql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 		default:
 			return nil, err
 		case errors.Is(err, sql.ErrNoRows):
-			return nil, ErrEmployeeNotFound(err, empNo)
+			err := ErrEmployeeNotFound(err, empNo)
+			span.RecordError(err)
+			return nil, err
 		}
 	}
 	return employee, nil
@@ -173,22 +229,27 @@ func (s *mySql) EmployeeRead(ctx context.Context, empNo int64) (*data.Employee, 
 func (s *mySql) EmployeesSearch(ctx context.Context, search data.EmployeeSearch) ([]*data.Employee, error) {
 	var employees []*data.Employee
 
+	ctx, span := s.Start(ctx, "sql.employee_search")
+	defer span.End()
 	criteria, args := employeeCriteria(search)
 	query := fmt.Sprintf(`SELECT emp_no, birth_date, first_name, last_name,
 		gender, hire_date FROM %s %s;`,
 		tableEmployees, criteria)
 	rows, err := s.QueryContext(ctx, query, args...)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	for rows.Next() {
 		employee, err := employeeScan(rows.Scan)
 		if err != nil {
+			span.RecordError(err)
 			return nil, err
 		}
 		employees = append(employees, employee)
 	}
 	if len(employees) <= 0 {
+		span.RecordError(ErrEmployeeSearchNotFound)
 		return nil, ErrEmployeeSearchNotFound
 	}
 	return employees, nil
@@ -198,6 +259,8 @@ func (s *mySql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial
 	var args []any
 	var updates []string
 
+	ctx, span := s.Start(ctx, "sql.employee_update")
+	defer span.End()
 	if employeePartial.BirthDate != nil {
 		args = append(args, time.Unix(*employeePartial.BirthDate, 0))
 		updates = append(updates, "birth_date = ?")
@@ -222,33 +285,48 @@ func (s *mySql) EmployeeUpdate(ctx context.Context, empNo int64, employeePartial
 		strings.Join(updates, ","))
 	args = append(args, empNo)
 	if _, err := s.ExecContext(ctx, query, args...); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
-	return s.EmployeeRead(ctx, empNo)
+	employee, err := s.EmployeeRead(ctx, empNo)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	return employee, nil
 }
 
 func (s *mySql) EmployeeDelete(ctx context.Context, empNo int64) error {
+	ctx, span := s.Start(ctx, "sql.employee_delete")
+	defer span.End()
 	query := fmt.Sprintf(`DELETE FROM %s WHERE emp_no = ?;`,
 		tableEmployees)
 	result, err := s.ExecContext(ctx, query, empNo)
 	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 	n, err := result.RowsAffected()
 	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 	if n == 0 {
-		return ErrEmployeeNotFound(nil, empNo)
+		err := ErrEmployeeNotFound(nil, empNo)
+		span.RecordError(err)
+		return err
 	}
 	return nil
 }
 
 func (s *mySql) Sleep(ctx context.Context, sleep data.Sleep) (*data.Sleep, error) {
+	ctx, span := s.Start(ctx, "sql.sleep")
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, s.config.QueryTimeout)
 	defer cancel()
 	query := "DO SLEEP(?);"
 	if _, err := s.ExecContext(ctx, query, sleep.Duration); err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	return &sleep, nil

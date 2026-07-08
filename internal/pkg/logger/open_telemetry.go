@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"strconv"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
-	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
@@ -30,6 +28,11 @@ type loggerOpenTelemetry struct {
 		enableSprintf      bool
 	}
 	loggerOpenTelemetryProvider *sdklog.LoggerProvider
+	slogger                     interface {
+		internal.Configurer
+		internal.Opener
+		Logger
+	}
 	*slog.Logger
 }
 
@@ -38,7 +41,9 @@ func NewOpenTelemetry(parameters ...any) interface {
 	internal.Opener
 	Logger
 } {
-	return &loggerOpenTelemetry{}
+	return &loggerOpenTelemetry{
+		slogger: NewSlog(),
+	}
 }
 
 func (l *loggerOpenTelemetry) Configure(envs map[string]string) error {
@@ -49,6 +54,9 @@ func (l *loggerOpenTelemetry) Configure(envs map[string]string) error {
 	l.config.otelExportInterval = time.Second
 	l.config.serviceName = "go-blog-observability"
 	l.config.hostname = "localhost"
+
+	//configure slogger
+	l.slogger.Configure(envs)
 
 	//configure for envs
 	for key, value := range envs {
@@ -75,14 +83,9 @@ func (l *loggerOpenTelemetry) Configure(envs map[string]string) error {
 }
 
 func (l *loggerOpenTelemetry) Open(ctx context.Context) error {
-	//create exporter and processor for standard out
-	stdoutExporter, err := stdoutlog.New(stdoutlog.WithWriter(os.Stdout))
-	if err != nil {
+	if err := l.slogger.Open(ctx); err != nil {
 		return err
 	}
-	// stdoutProcessor := sdklog.NewBatchProcessor(stdoutExporter)
-	stdoutProcessor := newFilterProcessor(
-		sdklog.NewBatchProcessor(stdoutExporter), l.config.level)
 
 	//create exporter and processor for open telemetry
 	httpOpts := []otlploghttp.Option{}
@@ -112,7 +115,6 @@ func (l *loggerOpenTelemetry) Open(ctx context.Context) error {
 	//create loggerOpenTelemetry provider
 	l.loggerOpenTelemetryProvider = sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(otelProcessor),
-		sdklog.WithProcessor(stdoutProcessor),
 		sdklog.WithResource(resource),
 	)
 
@@ -128,6 +130,7 @@ func (l *loggerOpenTelemetry) Close(ctx context.Context) {
 	if err := l.loggerOpenTelemetryProvider.Shutdown(ctx); err != nil {
 		fmt.Println(err)
 	}
+	l.slogger.Close(ctx)
 	l.loggerOpenTelemetryProvider = nil
 }
 
@@ -142,6 +145,7 @@ func (l *loggerOpenTelemetry) Error(ctx context.Context, msg string, items ...an
 	}
 	attrs = append(attrs, getAttributes(items)...)
 	l.LogAttrs(ctx, Error, msg, attrs...)
+	l.slogger.Error(ctx, msg, items...)
 }
 
 func (l *loggerOpenTelemetry) Info(ctx context.Context, msg string, items ...any) {
@@ -155,6 +159,7 @@ func (l *loggerOpenTelemetry) Info(ctx context.Context, msg string, items ...any
 	}
 	attrs = append(attrs, getAttributes(items)...)
 	l.LogAttrs(ctx, Info, msg, attrs...)
+	l.slogger.Info(ctx, msg, items...)
 }
 
 func (l *loggerOpenTelemetry) Debug(ctx context.Context, msg string, items ...any) {
@@ -168,6 +173,7 @@ func (l *loggerOpenTelemetry) Debug(ctx context.Context, msg string, items ...an
 	}
 	attrs = append(attrs, getAttributes(items)...)
 	l.LogAttrs(ctx, Debug, msg, attrs...)
+	l.slogger.Debug(ctx, msg, items...)
 }
 
 func (l *loggerOpenTelemetry) Warn(ctx context.Context, msg string, items ...any) {
@@ -181,4 +187,19 @@ func (l *loggerOpenTelemetry) Warn(ctx context.Context, msg string, items ...any
 	}
 	attrs = append(attrs, getAttributes(items)...)
 	l.LogAttrs(ctx, Warn, msg, attrs...)
+	l.slogger.Warn(ctx, msg, items...)
+}
+
+func (l *loggerOpenTelemetry) Trace(ctx context.Context, msg string, items ...any) {
+	var attrs []slog.Attr
+
+	if l.config.enableSprintf && hasFormatIdentifiers(msg) {
+		msg = fmt.Sprintf(msg, items...)
+	}
+	if ctxAttrs := pkgcontext.AttributesFrom(ctx); len(ctxAttrs) > 0 {
+		attrs = append(attrs, ctxAttrs...)
+	}
+	attrs = append(attrs, getAttributes(items)...)
+	l.LogAttrs(ctx, Trace, msg, attrs...)
+	l.slogger.Trace(ctx, msg, items...)
 }

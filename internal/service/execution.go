@@ -2,12 +2,10 @@ package service
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
-	"strings"
 
-	"github.com/antonio-alexander/go-blog-observability/internal/authz"
-	"github.com/antonio-alexander/go-blog-observability/internal/data"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 )
 
@@ -25,7 +23,7 @@ func errorTypeToStatusCode(e errors.ErrorType) int {
 		return http.StatusRequestTimeout
 	case errors.ErrorTypeNotImplemented:
 		return http.StatusNotImplemented
-	case authz.ErrorTypeUnauthorized:
+	case errors.ErrorTypeUnauthorized:
 		return http.StatusUnauthorized
 	case errors.ErrorTypeTooMuchData:
 		return http.StatusRequestEntityTooLarge
@@ -36,19 +34,6 @@ func getAuthorization(req *http.Request) string {
 	return req.Header.Get("Authorization")
 }
 
-func routeFromPath(path string) string {
-	switch {
-	default:
-		return path
-	case strings.HasPrefix(path, data.RouteSleep):
-		return data.RouteSleep
-	case strings.HasPrefix(path, data.RouteEmployees):
-		return data.RouteEmployees
-	case strings.HasPrefix(path, data.RoutePanic):
-		return data.RoutePanic
-	}
-}
-
 func getCorrelationId(req *http.Request) string {
 	if correlationId := req.Header.Get("Correlation-Id"); correlationId != "" {
 		return correlationId
@@ -57,11 +42,6 @@ func getCorrelationId(req *http.Request) string {
 		return correlationId
 	}
 	return ""
-}
-
-func empNoFromPath(pathVariables map[string]string) (int64, error) {
-	empNo := pathVariables[data.PathEmpNo]
-	return strconv.ParseInt(empNo, 10, 64)
 }
 
 func handleResponse(writer http.ResponseWriter, err error, items ...any) error {
@@ -76,6 +56,16 @@ func handleResponse(writer http.ResponseWriter, err error, items ...any) error {
 				return err
 			}
 			statusCode = http.StatusInternalServerError
+		case errors.Is(err, &http.MaxBytesError{}):
+			bytes, err = json.Marshal(errors.ErrorCommon{
+				ErrorMessage: "too much data",
+				ErrorType:    errors.ErrorTypeTooMuchData,
+				Local:        true,
+			})
+			if err != nil {
+				return err
+			}
+			statusCode = http.StatusRequestEntityTooLarge
 		case errors.Is(err, errors.ErrNotCached),
 			errors.Is(err, errors.ErrNotFound),
 			errors.Is(err, errors.ErrUnknown):
@@ -130,4 +120,17 @@ func handleResponse(writer http.ResponseWriter, err error, items ...any) error {
 		return err
 	}
 	return nil
+}
+
+func readRequestBody(r *http.Request, v ...any) ([]byte, error) {
+	bytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes) > 0 && len(v) > 0 {
+		if err := json.Unmarshal(bytes, v[0]); err != nil {
+			return nil, err
+		}
+	}
+	return bytes, nil
 }

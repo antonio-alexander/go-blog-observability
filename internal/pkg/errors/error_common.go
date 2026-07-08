@@ -7,7 +7,6 @@ import (
 )
 
 // ErrorCommon represents a common error that can be generated
-// swagger:model ErrorCommon
 type ErrorCommon struct {
 	//Err is a nested value that contains all wrapped
 	// errors in its native format
@@ -15,7 +14,6 @@ type ErrorCommon struct {
 
 	// ErrorMessage contains the simple (static) text
 	// of the error
-	// example: employee not found
 	ErrorMessage string `json:"error_message"`
 
 	// ErrorMessageDetail contains the complex (dynamic) text
@@ -23,8 +21,7 @@ type ErrorCommon struct {
 	ErrorMessageDetail string `json:"error_message_detail"`
 
 	// Type contains the text of the type of error
-	// example: not found
-	ErrorType ErrorType `json:"error_type"`
+	ErrorType ErrorType `json:"error_type,string"`
 
 	// DataId contains the relevant id if there was
 	// one involved in the error itself

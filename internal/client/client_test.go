@@ -22,10 +22,6 @@ var (
 	envs   = map[string]string{
 		//logger
 		"LOG_LEVEL": "trace",
-		// trace
-		"TRACE_ENABLE_STDOUT": "false",
-		//metrics
-		"METRICS_ENABLE_STDOUT": "false",
 		//authz
 		"AUTHZ_PRIVATE_SIGNING_METHOD":   "HS256",
 		"AUTHZ_PRIVATE_SIGNING_KEY":      "secret",

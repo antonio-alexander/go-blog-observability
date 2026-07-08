@@ -7,8 +7,6 @@ import (
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 )
 
-const packageName string = "github.com/antonio-alexander/go-blog-observability/internal/logic"
-
 const (
 	errMutationDisabled      string = "mutation disabled"
 	errCacheEnabledButNotSet string = "cache enabled, but no cache set/configured"

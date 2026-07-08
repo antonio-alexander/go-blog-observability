@@ -9,15 +9,15 @@ const (
 
 var ErrJwt = errors.ErrorCommon{
 	ErrorMessage: errJwt,
-	ErrorType:    ErrorTypeUnauthorized,
+	ErrorType:    errors.ErrorTypeUnauthorized,
 	Local:        true,
 }
 
 func ErrUnauthorized(userId, action, dataType string, dataId *string) error {
-	return ErrorUnauthorized{
+	return errors.ErrorUnauthorized{
 		ErrorCommon: errors.ErrorCommon{
 			ErrorMessage: errUnauthorized,
-			ErrorType:    ErrorTypeUnauthorized,
+			ErrorType:    errors.ErrorTypeUnauthorized,
 			DataId:       dataId,
 			DataType:     &dataType,
 			Local:        true,

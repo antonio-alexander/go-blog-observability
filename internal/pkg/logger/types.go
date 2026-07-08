@@ -11,6 +11,7 @@ const (
 	Info  slog.Level = slog.LevelInfo
 	Warn  slog.Level = slog.LevelWarn
 	Error slog.Level = slog.LevelError
+	Trace slog.Level = -5
 )
 
 type Logger interface {
@@ -18,6 +19,7 @@ type Logger interface {
 	Info(ctx context.Context, msg string, items ...any)
 	Error(ctx context.Context, msg string, items ...any)
 	Warn(ctx context.Context, msg string, items ...any)
+	Trace(ctx context.Context, msg string, items ...any)
 }
 
 func atoLogLevel(a string) slog.Level {

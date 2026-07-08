@@ -29,3 +29,5 @@ func (l *loggerNull) Info(ctx context.Context, msg string, items ...any) {}
 func (l *loggerNull) Debug(ctx context.Context, msg string, items ...any) {}
 
 func (l *loggerNull) Warn(ctx context.Context, msg string, items ...any) {}
+
+func (l *loggerNull) Trace(ctx context.Context, msg string, items ...any) {}

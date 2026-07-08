@@ -36,10 +36,6 @@ var (
 	envs   = map[string]string{
 		//logger
 		"LOG_LEVEL": "trace",
-		// trace
-		"TRACE_ENABLE_STDOUT": "false",
-		//metrics
-		"METRICS_ENABLE_STDOUT": "false",
 		//rego/policy
 		"REGO_COMPILE_FILENAME": "../../opa/compilation/",
 		"EVAL_COMPILE_FILENAME": "../../opa/evaluation",
@@ -118,9 +114,9 @@ type serviceTest struct {
 }
 
 func newServiceTest() *serviceTest {
-	tracer := tracer.NewOpenTelemetry()
-	metrics := metrics.NewOpenTelemetry()
 	logger := logger.NewOpenTelemetry()
+	tracer := tracer.NewOpenTelemetry(logger)
+	metrics := metrics.NewOpenTelemetry()
 	policy := policy.New(logger, tracer)
 	sql := sql.New(logger)
 	cache := cache.NewRedis(logger)
@@ -168,7 +164,9 @@ func (s *serviceTest) doRequest(ctx context.Context, uri, method, authorization 
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = request.Body.Close()
+	}()
 	switch response.StatusCode {
 	default:
 		byts, _ = io.ReadAll(response.Body)

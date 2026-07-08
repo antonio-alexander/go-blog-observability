@@ -9,21 +9,27 @@ import (
 )
 
 const (
-	errEmployeeNotCached            = "employee not cached"
-	errEmployeeNotFoundCached       = "employee not found; cached"
-	errEmployeeReadSet              = "employee not cached, read set"
-	errEmployeeReadAlreadySet       = "employee not cached, read already set"
-	errEmployeeSearchNotCached      = "employee search not cached"
-	errEmployeeSearchNotFoundCached = "employee search not found; cached"
-	errEmployeesSearchSet           = "employees search not cached, read set"
-	errEmployeesSearchAlreadySet    = "employees search not cached, read already set"
-	errSleepNotCached               = "sleep not cached"
-	errSleepNotFoundCached          = "sleep not found; cached"
-	errSleepReadSet                 = "sleep not cached, read set"
-	errSleepReadAlreadySet          = "sleep not cached, read already set"
+	packageName                     string = "github.com/antonio-alexander/go-blog-observability/internal/cache"
+	errEmployeeNotCached            string = "employee not cached"
+	errEmployeeNotFoundCached       string = "employee not found; cached"
+	errEmployeeReadSet              string = "employee not cached, read set"
+	errEmployeeReadAlreadySet       string = "employee not cached, read already set"
+	errEmployeeSearchNotCached      string = "employee search not cached"
+	errEmployeeSearchNotFoundCached string = "employee search not found; cached"
+	errEmployeesSearchSet           string = "employees search not cached, read set"
+	errEmployeesSearchAlreadySet    string = "employees search not cached, read already set"
+	errSleepNotCached               string = "sleep not cached"
+	errSleepNotFoundCached          string = "sleep not found; cached"
+	errSleepReadSet                 string = "sleep not cached, read set"
+	errSleepReadAlreadySet          string = "sleep not cached, read already set"
+	errCacheNotOpened               string = "cache not opened"
 )
 
 var (
+	ErrCacheNotOpened = error(errors.ErrorCommon{
+		ErrorMessage: errCacheNotOpened,
+		ErrorType:    errors.ErrorTypeUnknown,
+	})
 	ErrEmployeeSearchNotCached = error(errors.ErrorCommon{
 		ErrorMessage: errEmployeeSearchNotCached,
 		ErrorType:    errors.ErrorTypeNotCached,
@@ -80,7 +86,7 @@ func ErrEmployeeNotFoundCached(empNo int64) error {
 func ErrEmployeeReadSet(empNo int64) error {
 	return errors.ErrorCommon{
 		ErrorMessage: errEmployeeReadSet,
-		ErrorType:    errors.ErrorTypeNotCachedRetry,
+		ErrorType:    errors.ErrorTypeNotCachedInProgressSet,
 		DataId:       new(fmt.Sprint(empNo)),
 		DataType:     new("employee"),
 	}
@@ -116,7 +122,7 @@ func ErrSleepNotFoundCached(sleepId string) error {
 func ErrSleepReadSet(sleepId string) error {
 	return errors.ErrorCommon{
 		ErrorMessage: errSleepReadSet,
-		ErrorType:    errors.ErrorTypeNotCachedRetry,
+		ErrorType:    errors.ErrorTypeNotCachedInProgressSet,
 		DataId:       new(sleepId),
 		DataType:     new("sleep"),
 	}

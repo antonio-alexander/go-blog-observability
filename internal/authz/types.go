@@ -7,11 +7,11 @@ import (
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 )
 
-const packageName string = "github.com/antonio-alexander/go-blog-observability/internal/authz"
-
 const (
-	errMutationDisabled = "mutation disabled"
-	errMeterNil         = "meter is nil"
+	packageName         string = "github.com/antonio-alexander/go-blog-observability/internal/authz"
+	errMutationDisabled string = "mutation disabled"
+	errMeterNil         string = "meter is nil"
+	errAuthzNotOpened   string = "authz not opened"
 )
 
 var (
@@ -21,6 +21,10 @@ var (
 	})
 	ErrMeterNil = error(errors.ErrorCommon{
 		ErrorMessage: errMeterNil,
+		ErrorType:    errors.ErrorTypeUnknown,
+	})
+	ErrAuthzNotOpened = error(errors.ErrorCommon{
+		ErrorMessage: errAuthzNotOpened,
 		ErrorType:    errors.ErrorTypeUnknown,
 	})
 )
@@ -34,4 +38,6 @@ type Authz interface {
 
 	Sleep(ctx context.Context, sleepPartial data.Sleep) (*data.Sleep, error)
 	Panic(ctx context.Context)
+
+	Authorize(ctx context.Context, userId string) (string, error)
 }

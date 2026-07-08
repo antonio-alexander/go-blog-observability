@@ -28,10 +28,6 @@ var (
 	envs   = map[string]string{
 		//logger
 		"LOG_LEVEL": "trace",
-		// trace
-		"TRACE_ENABLE_STDOUT": "false",
-		//metrics
-		"METRICS_ENABLE_STDOUT": "false",
 		//rego/policy
 		"REGO_COMPILE_FILENAME": "../../opa/compilation/",
 		"EVAL_COMPILE_FILENAME": "../../opa/evaluation",
@@ -100,9 +96,9 @@ type authzTest struct {
 }
 
 func newLogicTest() *authzTest {
-	tracer := tracer.NewOpenTelemetry()
-	metrics := metrics.NewOpenTelemetry()
 	logger := logger.NewSlog()
+	metrics := metrics.NewOpenTelemetry()
+	tracer := tracer.NewOpenTelemetry(logger)
 	policy := policy.New(logger, tracer)
 	sql := sql.New(logger)
 	cache := cache.NewRedis(logger)

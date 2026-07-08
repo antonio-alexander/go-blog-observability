@@ -1,4 +1,4 @@
-package internal
+package scenario
 
 import (
 	"context"
@@ -14,11 +14,11 @@ import (
 	pkgcontext "github.com/antonio-alexander/go-blog-observability/internal/pkg/context"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/errors"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/logger"
+	"github.com/google/uuid"
 )
 
-func scenarioStampedingHerd(ctx context.Context, envs map[string]string, logger logger.Logger,
-	token string, clients ...client.Client) error {
-	const correlationId string = "scenario_stampeding_herd"
+func ScenarioStampedingHerd(ctx context.Context, envs map[string]string, logger logger.Logger,
+	clients ...client.Client) error {
 	const minClients int = 2
 
 	var wg sync.WaitGroup
@@ -38,12 +38,29 @@ func scenarioStampedingHerd(ctx context.Context, envs map[string]string, logger 
 		i, _ := strconv.Atoi(s)
 		scenarioDuration = time.Duration(i) * time.Second
 	}
+	userId := uuid.NewString()
+	if s, ok := envs["SCENARIO_USER_ID"]; ok {
+		userId = s
+	}
 	if len(clients) < minClients {
 		return errors.Must(errors.New("not enough clients provided"))
 	}
 
-	//generate context
+	//generate context/correlation id
+	correlationId := internal.GenerateId()
 	ctx = pkgcontext.WithCorrelationId(ctx, correlationId)
+	logger.Info(ctx, "generated correlation id",
+		slog.String("scenario", "stampeding_herd"),
+		slog.String("correlation_id", correlationId))
+
+	//generate token
+	token, err := clients[0].Authorize(ctx, userId)
+	if err != nil {
+		return err
+	}
+	logger.Info(ctx, "generated token",
+		slog.String("token", token),
+		slog.String("user_id", userId))
 
 	// create employee using the first client
 	birthDate := time.Now().Unix()
@@ -112,10 +129,6 @@ func scenarioStampedingHerd(ctx context.Context, envs map[string]string, logger 
 		go func(ctx context.Context, clientNumber int, client client.Client) {
 			defer wg.Done()
 
-			ctx = pkgcontext.WithCorrelationId(ctx, internal.GenerateId())
-			logger.Info(ctx, "generated correlation id",
-				slog.String("scenario", "stampeding_herd"),
-				slog.Int("client_number", clientNumber))
 			readEmployeeFx := func(ctx context.Context) {
 				if _, err := client.EmployeeRead(ctx, token, empNo); err != nil {
 					logger.Error(ctx, "unable to read employee", err,
@@ -151,9 +164,8 @@ func scenarioStampedingHerd(ctx context.Context, envs map[string]string, logger 
 	return nil
 }
 
-func scenarioCacheNotFound(ctx context.Context, envs map[string]string, logger logger.Logger,
-	token string, clients ...client.Client) error {
-	const correlationId string = "scenario_cache_not_found"
+func ScenarioCacheNotFound(ctx context.Context, envs map[string]string, logger logger.Logger,
+	clients ...client.Client) error {
 	const minClients int = 1
 
 	var employeeDeleted bool
@@ -169,12 +181,29 @@ func scenarioCacheNotFound(ctx context.Context, envs map[string]string, logger l
 		i, _ := strconv.Atoi(s)
 		scenarioDuration = time.Duration(i) * time.Second
 	}
+	userId := uuid.NewString()
+	if s, ok := envs["SCENARIO_USER_ID"]; ok {
+		userId = s
+	}
 	if len(clients) < minClients {
 		return errors.Must(errors.New("not enough clients provided"))
 	}
 
-	//generate context
+	//generate context/correlation id
+	correlationId := internal.GenerateId()
 	ctx = pkgcontext.WithCorrelationId(ctx, correlationId)
+	logger.Info(ctx, "generated correlation id",
+		slog.String("scenario", "cache_not_found"),
+		slog.String("correlation_id", correlationId))
+
+	//generate token
+	token, err := clients[0].Authorize(ctx, userId)
+	if err != nil {
+		return err
+	}
+	logger.Info(ctx, "generated token",
+		slog.String("token", token),
+		slog.String("user_id", userId))
 
 	// create employee
 	birthDate := time.Now().Unix()
@@ -217,10 +246,6 @@ func scenarioCacheNotFound(ctx context.Context, envs map[string]string, logger l
 		go func(ctx context.Context, clientNumber int, client client.Client) {
 			defer wg.Done()
 
-			ctx = pkgcontext.WithCorrelationId(ctx, internal.GenerateId())
-			logger.Info(ctx, "generated correlation id",
-				slog.String("scenario", "cache_not_found"),
-				slog.Int("client_number", clientNumber))
 			readEmployeeFx := func(ctx context.Context) error {
 				if _, err := client.EmployeeRead(ctx, token, empNo); err != nil {
 					return err
@@ -266,9 +291,8 @@ func scenarioCacheNotFound(ctx context.Context, envs map[string]string, logger l
 	return nil
 }
 
-func scenarioSleepRetry(ctx context.Context, envs map[string]string, logger logger.Logger,
+func ScenarioSleepRetry(ctx context.Context, envs map[string]string, logger logger.Logger,
 	clients ...client.Client) error {
-	const correlationId string = "scenario_retry"
 	const minClients int = 1
 
 	var wg sync.WaitGroup
@@ -287,16 +311,26 @@ func scenarioSleepRetry(ctx context.Context, envs map[string]string, logger logg
 	if s, ok := envs["SCENARIO_SLEEP_DURATION"]; ok {
 		scenarioSleepDuration, _ = strconv.ParseInt(s, 10, 64)
 	}
-	scenarioSleepId := internal.GenerateId()
-	if s, ok := envs["SCENARIO_SLEEP_ID"]; ok {
-		scenarioSleepId = s
+	scenarioSleepId := ""
+	if s, ok := envs["SCENARIO_GENERATE_SLEEP_ID"]; ok {
+		b, err := strconv.ParseBool(s)
+		if err == nil && b {
+			scenarioSleepId = internal.GenerateId()
+			logger.Info(ctx, "generated sleep id",
+				slog.String("scenario", "sleep_retry"),
+				slog.String("sleep_id", scenarioSleepId))
+		}
 	}
 	if len(clients) < minClients {
 		return errors.Must(errors.New("not enough clients provided"))
 	}
 
-	//generate context
+	//generate context/correlation id
+	correlationId := internal.GenerateId()
 	ctx = pkgcontext.WithCorrelationId(ctx, correlationId)
+	logger.Info(ctx, "generated correlation id",
+		slog.String("scenario", "sleep_retry"),
+		slog.String("correlation_id", correlationId))
 
 	//generate start/stop channels
 	start, stop := make(chan struct{}), make(chan struct{})
@@ -307,10 +341,6 @@ func scenarioSleepRetry(ctx context.Context, envs map[string]string, logger logg
 		go func(ctx context.Context, clientNumber int, client client.Client) {
 			defer wg.Done()
 
-			ctx = pkgcontext.WithCorrelationId(ctx, internal.GenerateId())
-			logger.Info(ctx, "generated correlation id",
-				slog.String("scenario", "sleep"),
-				slog.Int("client_number", clientNumber))
 			sleepFx := func(ctx context.Context) error {
 				if _, err := client.Sleep(ctx, data.Sleep{
 					Id:       scenarioSleepId,
@@ -349,9 +379,8 @@ func scenarioSleepRetry(ctx context.Context, envs map[string]string, logger logg
 	return nil
 }
 
-func scenarioSustainedTraffic(ctx context.Context, envs map[string]string, logger logger.Logger,
+func ScenarioSustainedTraffic(ctx context.Context, envs map[string]string, logger logger.Logger,
 	clients ...client.Client) error {
-	// const correlationId string = "scenario_sustained_traffic"
 	const minClients int = 1
 
 	var wg sync.WaitGroup
@@ -377,17 +406,40 @@ func scenarioSustainedTraffic(ctx context.Context, envs map[string]string, logge
 			scenarioSleepDuration = i
 		}
 	}
-	scenarioSleepId := internal.GenerateId()
-	if s, ok := envs["SCENARIO_SLEEP_ID"]; ok {
-		scenarioSleepId = s
+	scenarioSleepId := ""
+	if s, ok := envs["SCENARIO_GENERATE_SLEEP_ID"]; ok {
+		b, err := strconv.ParseBool(s)
+		if err == nil && b {
+			scenarioSleepId = internal.GenerateId()
+			logger.Info(ctx, "generated sleep id",
+				slog.String("scenario", "sustained_traffic"),
+				slog.String("sleep_id", scenarioSleepId))
+
+		}
+	}
+	scenarioClearCache := false
+	if s, ok := envs["SCENARIO_CLEAR_CACHE"]; ok {
+		b, err := strconv.ParseBool(s)
+		if err == nil {
+			scenarioClearCache = b
+		}
 	}
 	if len(clients) < minClients {
 		return errors.Must(errors.New("not enough clients provided"))
 	}
 
+	//generate context/correlation id
+	correlationId := internal.GenerateId()
+	ctx = pkgcontext.WithCorrelationId(ctx, correlationId)
+	logger.Info(ctx, "generated correlation id",
+		slog.String("scenario", "sustained_traffic"),
+		slog.String("correlation_id", correlationId))
+
 	//clear cache
-	if err := clients[0].CacheClear(ctx); err != nil {
-		return err
+	if scenarioClearCache {
+		if err := clients[0].CacheClear(ctx); err != nil {
+			return err
+		}
 	}
 
 	//cache the sleep so we can always engage the logic
@@ -408,10 +460,6 @@ func scenarioSustainedTraffic(ctx context.Context, envs map[string]string, logge
 		go func(ctx context.Context, clientNumber int, client client.Client) {
 			defer wg.Done()
 
-			ctx = pkgcontext.WithCorrelationId(ctx, internal.GenerateId())
-			logger.Info(ctx, "generated correlation id",
-				slog.String("scenario", "sustained_traffic"),
-				slog.Int("client_number", clientNumber))
 			sleepFx := func(ctx context.Context) error {
 				if _, err := client.Sleep(ctx, data.Sleep{
 					Id:       scenarioSleepId,
@@ -450,11 +498,9 @@ func scenarioSustainedTraffic(ctx context.Context, envs map[string]string, logge
 	return nil
 }
 
-func scenarioPercentileLatency(ctx context.Context, envs map[string]string, logger logger.Logger,
+func ScenarioPercentileLatency(ctx context.Context, envs map[string]string, logger logger.Logger,
 	clients ...client.Client) error {
-	// const correlationId string = "scenario_sustained_traffic"
-	const minClients int = 1
-	const minSleep int64 = 1 //1s
+	const minClients int = 10
 
 	var wg sync.WaitGroup
 
@@ -472,16 +518,15 @@ func scenarioPercentileLatency(ctx context.Context, envs map[string]string, logg
 			scenarioDuration = time.Duration(i) * time.Second
 		}
 	}
-	scenarioSleepDuration := int64(1)
-	if s, ok := envs["SCENARIO_SLEEP_DURATION"]; ok {
-		i, err := strconv.ParseInt(s, 10, 64)
-		if err == nil {
-			scenarioSleepDuration = i
+	scenarioSleepId := ""
+	if s, ok := envs["SCENARIO_GENERATE_SLEEP_ID"]; ok {
+		b, err := strconv.ParseBool(s)
+		if err == nil && b {
+			scenarioSleepId = internal.GenerateId()
+			logger.Info(ctx, "generated sleep id",
+				slog.String("scenario", "percentile_latency"),
+				slog.String("sleep_id", scenarioSleepId))
 		}
-	}
-	scenarioSleepId := internal.GenerateId()
-	if s, ok := envs["SCENARIO_SLEEP_ID"]; ok {
-		scenarioSleepId = s
 	}
 	scenarioPercentile := int(99)
 	if s, ok := envs["SCENARIO_PERCENTILE"]; ok {
@@ -490,50 +535,74 @@ func scenarioPercentileLatency(ctx context.Context, envs map[string]string, logg
 			scenarioPercentile = i
 		}
 	}
+	minSleep := int64(1) //1s
+	if s, ok := envs["SCENARIO_MIN_SLEEP"]; ok {
+		i, err := strconv.ParseInt(s, 10, 64)
+		if err == nil {
+			minSleep = i
+		}
+	}
+	maxSleep := int64(5) //5s
+	if s, ok := envs["SCENARIO_MAX_SLEEP"]; ok {
+		i, err := strconv.ParseInt(s, 10, 64)
+		if err == nil {
+			maxSleep = i
+		}
+	}
 	if len(clients) < minClients {
 		return errors.Must(errors.New("not enough clients provided"))
 	}
 
+	//generate context/correlation id
+	correlationId := internal.GenerateId()
+	ctx = pkgcontext.WithCorrelationId(ctx, correlationId)
+	logger.Info(ctx, "generated correlation id",
+		slog.String("scenario", "percentile_latency"),
+		slog.String("correlation_id", correlationId))
+
 	//determine percentiles
 	sleepDurations := make([]int64, 0, len(clients))
-	switch scenarioPercentile {
-	case 50:
-		n := len(clients) % 2
-		for i := range n {
-			sleepDurations[i] = minSleep
+	switch {
+	default:
+		return errors.Must(errors.New("unsupported scenario percentile"))
+	case scenarioPercentile >= 90:
+		// how to get n == 9
+		n := 9
+		if len(clients)%n == 0 {
+			n--
 		}
-		for i := range len(clients) - n {
-			sleepDurations[i+n] = minSleep
+		for range n {
+			sleepDurations = append(sleepDurations, minSleep)
+		}
+		for range len(clients) - n {
+			sleepDurations = append(sleepDurations, maxSleep)
+		}
+	case scenarioPercentile == 50: //simulate conditions p50
+		n := 5
+		if len(clients)%n == 0 {
+			n--
+		}
+		for range n {
+			sleepDurations = append(sleepDurations, minSleep)
+		}
+		for range len(clients) - n {
+			sleepDurations = append(sleepDurations, maxSleep)
 		}
 	}
 
-	//clear cache
-	if err := clients[0].CacheClear(ctx); err != nil {
-		return err
-	}
-
-	//cache the sleep so we can always engage the logic
-	// in the same way
-	if _, err := clients[0].Sleep(ctx, data.Sleep{
-		Id:       scenarioSleepId,
-		Duration: scenarioSleepDuration,
-	}); err != nil {
-		return err
-	}
+	//no real need to interact with the cache
 
 	//generate start/stop channels
 	start, stop := make(chan struct{}), make(chan struct{})
 
+	//start go routines
 	for i := range clients {
-		//TODO: calculate sleep duration based on percentile
 		wg.Add(1)
 		go func(ctx context.Context, clientNumber int, client client.Client, sleepDuration int64) {
 			defer wg.Done()
 
-			ctx = pkgcontext.WithCorrelationId(ctx, internal.GenerateId())
-			logger.Info(ctx, "generated correlation id",
-				slog.String("scenario", "percentile_latency"),
-				slog.Int("client_number", clientNumber))
+			var nRequests, nRequestsFailed int
+
 			sleepFx := func(ctx context.Context) error {
 				if _, err := client.Sleep(ctx, data.Sleep{
 					Id:       scenarioSleepId,
@@ -549,11 +618,20 @@ func scenarioPercentileLatency(ctx context.Context, envs map[string]string, logg
 			for {
 				select {
 				case <-stop:
+					logger.Info(ctx, "execution completed",
+						slog.String("scenario", "percentile_latency"),
+						slog.Int("client_number", clientNumber),
+						slog.Int("number_of_requests", nRequests),
+						slog.Int("number_of_failed_requests", nRequestsFailed),
+						slog.Int64("sleep_duration", sleepDuration))
 					return
 				case <-tRead.C:
 					if err := sleepFx(ctx); err != nil {
 						logger.Error(ctx, "error while sleeping", err)
+						nRequestsFailed++
+						continue
 					}
+					nRequests++
 				}
 			}
 		}(ctx, i, clients[i], sleepDurations[i])

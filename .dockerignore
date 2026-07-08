@@ -1,0 +1,8 @@
+*.md
+tmp/*
+docker-compose*.yml
+Dockerfile
+internal/swagger/*
+.vscode/*
+LICENSE
+Makefile

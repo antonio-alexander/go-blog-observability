@@ -12,8 +12,7 @@ import (
 )
 
 var envs = map[string]string{
-	"OTEL_LOG_LEVEL":        "info",
-	"METRICS_ENABLE_STDOUT": "true",
+	"OTEL_LOG_LEVEL": "info",
 }
 
 func init() {

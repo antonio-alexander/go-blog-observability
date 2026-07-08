@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/antonio-alexander/go-blog-observability/internal"
@@ -25,16 +27,25 @@ import (
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/metrics"
 	"github.com/antonio-alexander/go-blog-observability/internal/pkg/tracer"
 
-	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/trace"
 )
 
 type service struct {
 	sync.RWMutex
 	sync.WaitGroup
+	*http.ServeMux
+	*http.Server
+	logger.Logger
+	tracer.Tracer
+	metrics.Metrics
+	*metrics.Int64UpDownCounterHelper
+	*metrics.Int64CounterHelper
+	*metrics.Float64HistogramHelper
+	*metrics.Int64HistogramHelper
+	authz.Authz
 	config struct {
 		address          string
 		port             string
@@ -52,32 +63,22 @@ type service struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	cache  internal.Clearer
-	logger.Logger
-	metrics.Metrics
-	tracer.Tracer
-	authz.Authz
-	*mux.Router
-	*http.Server
-	meter      metrics.Meter
-	histograms struct {
-		sync.RWMutex
-		data map[string]metrics.Float64Histogram
-	}
-	counters struct {
-		sync.RWMutex
-		data map[string]metrics.Int64UpDownCounter
-	}
+	opened atomic.Bool
 }
 
 func New(parameters ...any) interface {
 	internal.Configurer
 	internal.Opener
 } {
-	router := mux.NewRouter()
+	serveMux := http.NewServeMux()
 	s := &service{
-		Router: router,
+		Int64CounterHelper:       metrics.NewInt64CounterHelper(),
+		Float64HistogramHelper:   metrics.NewFloat64HistogramHelper(),
+		Int64HistogramHelper:     metrics.NewInt64HistogramHelper(),
+		Int64UpDownCounterHelper: metrics.NewInt64UpDownCounterHelper(),
+		ServeMux:                 serveMux,
 		Server: &http.Server{
-			Handler: router,
+			Handler: serveMux,
 		},
 	}
 	for _, parameter := range parameters {
@@ -99,27 +100,28 @@ func New(parameters ...any) interface {
 	}
 	switch {
 	case s.Logger == nil:
-		panic("Logger not set")
+		panic("logger not set")
 	case s.Authz == nil:
-		panic("Authz not set")
+		panic("authz not set")
 	case s.Metrics == nil:
-		panic("Metrics not set")
+		panic("metrics not set")
 	case s.Tracer == nil:
-		panic("Tracer not set")
+		panic("tracer not set")
 	}
-	s.counters.data = make(map[string]metrics.Int64UpDownCounter)
-	s.histograms.data = make(map[string]metrics.Float64Histogram)
 	return s
+}
+
+func (s *service) handleResponse(ctx context.Context, w http.ResponseWriter, err error, items ...any) {
+	if err := handleResponse(w, err, items...); err != nil {
+		s.Error(ctx, "unable to handle response", err)
+	}
 }
 
 func (s *service) launchServer() error {
 	started := make(chan struct{})
 	chErr := make(chan error, 1)
-	s.Add(1)
-	go func() {
-		defer s.WaitGroup.Done()
+	s.Go(func() {
 		defer close(chErr)
-
 		if !s.config.corsDisabled {
 			s.Server.Handler = cors.New(cors.Options{
 				AllowedOrigins:   s.config.allowedOrigins,
@@ -127,13 +129,13 @@ func (s *service) launchServer() error {
 				AllowedMethods:   s.config.allowedMethods,
 				AllowedHeaders:   s.config.allowedHeaders,
 				Debug:            s.config.corsDebug,
-			}).Handler(s.Router)
+			}).Handler(s.ServeMux)
 		}
 		close(started)
-		if err := s.Server.ListenAndServe(); err != nil {
+		if err := s.ListenAndServe(); err != nil {
 			chErr <- err
 		}
-	}()
+	})
 	<-started
 	select {
 	case err := <-chErr:
@@ -148,100 +150,37 @@ func (s *service) launchServer() error {
 	}
 }
 
-func (s *service) readRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
-	r.Body = http.MaxBytesReader(w, r.Body, int64(s.config.maxRequestBytes))
-	bytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		switch {
-		default:
-			return nil, err
-		case errors.Is(err, &http.MaxBytesError{}):
-			return nil, &errors.ErrorCommon{
-				Err:                err,
-				ErrorMessage:       err.Error(),
-				ErrorMessageDetail: "",
-				ErrorType:          errors.ErrorTypeTooMuchData,
-				Local:              true,
-			}
-		}
-	}
-	return bytes, nil
-}
-
-func (s *service) createHistogram(histogramName string) (metrics.Float64Histogram, error) {
-	s.histograms.Lock()
-	defer s.histograms.Unlock()
-	histogram, err := createHistogram(s.meter, histogramName)
-	if err != nil {
-		return nil, err
-	}
-	s.histograms.data[histogramName] = histogram
-	return histogram, nil
-}
-
-func (s *service) createCounter(counterName string) (metrics.Int64UpDownCounter, error) {
-	s.counters.Lock()
-	defer s.counters.Unlock()
-	counter, err := createCounter(s.meter, counterName)
-	if err != nil {
-		return nil, err
-	}
-	s.counters.data[counterName] = counter
-	return counter, nil
-}
-
-func (s *service) readSpanCounter(spanName string) (metrics.Int64UpDownCounter, error) {
-	s.counters.Lock()
-	defer s.counters.Unlock()
-	counter, ok := s.counters.data[spanName]
-	if !ok {
-		c, err := s.meter.Int64UpDownCounter(spanName)
-		if err != nil {
-			return nil, err
-		}
-		counter = c
-		s.counters.data[spanName] = c
-	}
-	return counter, nil
-}
-
-func (s *service) readCounter(counterName string) metrics.Int64UpDownCounter {
-	s.counters.RLock()
-	defer s.counters.RUnlock()
-	counter, ok := s.counters.data[counterName]
-	if !ok {
-		return nil
-	}
-	return counter
-}
-
-func (s *service) readHistogram(histogramName string) metrics.Float64Histogram {
-	s.histograms.RLock()
-	defer s.histograms.RUnlock()
-	histogram, ok := s.histograms.data[histogramName]
-	if !ok {
-		return nil
-	}
-	return histogram
-}
-
 func (s *service) middlewareInitialize() middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx := pkgcontext.WithCorrelationId(r.Context(), getCorrelationId(r))
-			ctx = pkgcontext.WithRequestId(ctx, internal.GenerateId())
+			ctx := s.ExtractTrace(r)
+			ctx = pkgcontext.WithAttributes(ctx,
+				slog.String("correlation_id", getCorrelationId(r)),
+				slog.String("request_id", internal.GenerateId()),
+				slog.String("http.method", r.Method),
+				slog.String("http.route", r.Pattern),
+			)
+			spanName := r.Method + " " + r.Pattern
+			ctx, span := s.Start(ctx, spanName)
+			defer span.End()
 			r = r.WithContext(ctx)
-			next.ServeHTTP(w, r)
+			wWrapped := &responseWriterWrapper{ResponseWriter: w}
+			next.ServeHTTP(wWrapped, r)
+			switch wWrapped.statusCode {
+			case http.StatusOK, http.StatusNoContent:
+				span.SetStatus(codes.Ok, "")
+			}
 		})
 	}
 }
 
 func (s *service) middlewareLatency() middleware {
-	histogramDuration := s.readHistogram(histogramNameDuration)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func(ctx context.Context, start time.Time) {
-				histogramDuration.Record(ctx, time.Since(start).Seconds())
+				duration := time.Since(start)
+				s.Float64HistogramHelper.Record(ctx, histogramNameDuration,
+					duration.Seconds())
 			}(r.Context(), time.Now())
 			next.ServeHTTP(w, r)
 		})
@@ -249,16 +188,15 @@ func (s *service) middlewareLatency() middleware {
 }
 
 func (s *service) middlewarePanic() middleware {
-	panicCounter := s.readCounter(counterNamePanicsTotal)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func(ctx context.Context) {
-				if r := recover(); r != nil {
-					panicCounter.Add(ctx, 1)
+				if recvr := recover(); recvr != nil {
+					s.Int64CounterHelper.Add(ctx, counterNamePanicsTotal, 1)
 					args := make([]slog.Attr, 0, 2)
 					args = append(args, slog.String("stack_trace", string(debug.Stack())))
 					args = append(args, slog.String("panic", fmt.Sprintf("%v", r)))
-					if runErr, ok := r.(runtime.Error); ok {
+					if runErr, ok := recvr.(runtime.Error); ok {
 						args = append(args, slog.String("runtime_error", runErr.Error()))
 					}
 					s.Warn(ctx, "panic has occurred", args)
@@ -269,58 +207,62 @@ func (s *service) middlewarePanic() middleware {
 	}
 }
 
-func (s *service) middlewareRequest() middleware {
-	counterActiveRequests := s.readCounter(counterNameActiveRequests)
-	counterRequestsTotal := s.readCounter(counterNameRequestsTotal)
-	counterTotalRequestBytes := s.readCounter(counterNameTotalRequestBytes)
-	counterResponseBytes := s.readCounter(counterNameTotalResponseBytes)
-	counterFailedRequests := s.readCounter(counterNameRequestsFailed)
-	counterSuccessfulRequests := s.readCounter(counterNameRequestsSuccessful)
+func (s *service) middlewareMaxRequestSize() middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
-			counterActiveRequests.Add(ctx, 1) //active requests
-			defer counterActiveRequests.Add(ctx, -1)
-			counterRequestsTotal.Add(ctx, 1) //total requests
-			statusWriter := &statusCodeResponseWriter{ResponseWriter: w}
-			counterTotalRequestBytes.Add(ctx, r.ContentLength)                          //request bytes
-			next.ServeHTTP(statusWriter, r)                                             //execute next request
-			if contentLength := w.Header().Get("Content-Length"); contentLength != "" { //get response length
-				i, err := strconv.ParseInt(contentLength, 10, 64)
-				if err == nil {
-					counterResponseBytes.Add(ctx, i)
-				}
-			}
-			switch statusWriter.statusCode {
-			default:
-				counterFailedRequests.Add(r.Context(), 1)
-			case http.StatusOK, http.StatusNoContent:
-				counterSuccessfulRequests.Add(r.Context(), 1)
-			}
-		})
-	}
-}
-
-func (s *service) middlewareSpan() middleware {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			spanName := fmt.Sprintf("%s_%s", r.Method, routeFromPath(r.URL.Path))
-			ctx, span := s.Start(r.Context(), spanName, trace.WithNewRoot())
-			defer span.End()
-			if spanCounter, err := s.readSpanCounter(spanName); err == nil {
-				spanCounter.Add(ctx, 1, metric.WithAttributes(
-					attribute.String("http.method", r.Method),
-					attribute.String("http.route", routeFromPath(r.URL.Path)),
-				))
-			}
-			r = r.WithContext(ctx)
+			r.Body = http.MaxBytesReader(w, r.Body, s.config.maxRequestBytes)
 			next.ServeHTTP(w, r)
 		})
 	}
 }
 
-func (s *service) endpointDefault(writer http.ResponseWriter, request *http.Request) {
-	fmt.Fprintf(writer,
+func (s *service) middlewareRequest() middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			s.Int64UpDownCounterHelper.Add(ctx, counterNameActiveRequests, 1)
+			defer s.Int64UpDownCounterHelper.Add(ctx, counterNameActiveRequests, -1)
+			s.Int64CounterHelper.Add(ctx, counterNameRequestsTotal, 1)
+			wWrapped := &responseWriterWrapper{ResponseWriter: w}
+			s.Int64CounterHelper.Add(ctx, counterNameTotalRequestBytes, r.ContentLength)
+			s.Int64HistogramHelper.Record(ctx, histogramNameRequestBytes, r.ContentLength)
+			next.ServeHTTP(wWrapped, r)
+			if contentLength := int64(len(wWrapped.bytes)); contentLength > 0 {
+				s.Int64CounterHelper.Add(ctx, counterNameTotalResponseBytes, contentLength)
+				s.Int64HistogramHelper.Record(ctx, histogramNameResponseBytes, contentLength)
+			}
+			option := metric.WithAttributes(
+				attribute.Int("http.status_code", wWrapped.statusCode),
+			)
+			switch wWrapped.statusCode {
+			default:
+				s.Int64CounterHelper.Add(ctx, counterNameRequestsFailed, 1, option)
+				if len(wWrapped.bytes) > 0 {
+					var e error
+
+					errUnauthorized := new(errors.ErrorUnauthorized)
+					if err := json.Unmarshal(wWrapped.bytes, errUnauthorized); err == nil &&
+						errUnauthorized.ErrorType != "" {
+						e = errUnauthorized
+					}
+					if e == nil {
+						errCommon := new(errors.ErrorCommon)
+						if err := json.Unmarshal(wWrapped.bytes, errCommon); err == nil &&
+							errCommon.ErrorType != "" {
+							e = errCommon
+						}
+					}
+					s.Error(ctx, "request failed", slog.Any("error", e))
+				}
+			case http.StatusOK, http.StatusNoContent:
+				s.Int64CounterHelper.Add(ctx, counterNameRequestsSuccessful, 1, option)
+			}
+		})
+	}
+}
+
+func (s *service) endpointDefault(w http.ResponseWriter, _ *http.Request) {
+	_, _ = fmt.Fprintf(w,
 		"go-blog-observability\n"+
 			"Version: \"%s\"\n"+
 			"Git Commit: \"%s\"\n"+
@@ -328,183 +270,156 @@ func (s *service) endpointDefault(writer http.ResponseWriter, request *http.Requ
 		data.Version, data.GitCommit, data.GitBranch)
 }
 
-func (s *service) endpointEmployeeCreate(writer http.ResponseWriter, request *http.Request) {
-	var employeeRequest data.Request
+func (s *service) endpointAuthorize(w http.ResponseWriter, r *http.Request) {
+	var userId string
 
-	ctx := request.Context()
-	bytes, err := s.readRequestBody(writer, request)
-	defer request.Body.Close()
-	if err != nil {
-		_ = handleResponse(writer, err, nil)
-		return
-	}
-	if err := json.Unmarshal(bytes, &employeeRequest); err != nil {
-		_ = handleResponse(writer, err, nil)
-		return
-	}
-	employee, err := s.EmployeeCreate(ctx, getAuthorization(request), employeeRequest.EmployeePartial)
-	if err := handleResponse(writer, err, &data.Response{
-		Employee: employee,
+	ctx := r.Context()
+	if _, err := readRequestBody(r, &struct {
+		UserId *string `json:"user_id"`
+	}{
+		UserId: &userId,
 	}); err != nil {
-		s.Error(ctx, "unable to handle response", err)
+		s.handleResponse(ctx, w, err, nil)
 		return
 	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employee_create", slog.Int64("emp_no", employee.EmpNo))
-	} else {
-		s.Debug(ctx, "failed to execute employee_create", err, slog.Int64("emp_no", employee.EmpNo))
+	defer func() {
+		_ = r.Body.Close()
+	}()
+	authorization, err := s.Authorize(ctx, userId)
+	if err != nil {
+		s.handleResponse(r.Context(), w, err, nil)
+		return
 	}
+	s.handleResponse(ctx, w, err, &data.Response{
+		Authorization: &authorization,
+	})
 }
 
-func (s *service) endpointEmployeeRead(writer http.ResponseWriter, request *http.Request) {
-	ctx := request.Context()
-	empNo, err := empNoFromPath(mux.Vars(request))
-	if err != nil {
-		_ = handleResponse(writer, err, nil)
+func (s *service) endpointEmployeeCreate(w http.ResponseWriter, r *http.Request) {
+	var request data.Request
+
+	ctx := r.Context()
+	if _, err := readRequestBody(r, &request); err != nil {
+		s.handleResponse(r.Context(), w, err, nil)
 		return
 	}
-	employee, err := s.EmployeeRead(ctx, getAuthorization(request), empNo)
-	if err := handleResponse(writer, err, &data.Response{
+	authorization := getAuthorization(r)
+	employee, err := s.EmployeeCreate(ctx, authorization, request.EmployeePartial)
+	s.handleResponse(r.Context(), w, err, &data.Response{
 		Employee: employee,
-	}); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employee_read", slog.Int64("emp_no", empNo))
-	} else {
-		s.Debug(ctx, "failed to execute employee_read", err, slog.Int64("emp_no", empNo))
-	}
+	})
 }
 
-func (s *service) endpointEmployeesSearch(writer http.ResponseWriter, request *http.Request) {
+func (s *service) endpointEmployeeRead(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	empNo, err := strconv.ParseInt(r.PathValue(data.PathEmpNo), 10, 64)
+	if err != nil {
+		s.handleResponse(r.Context(), w, err, nil)
+		return
+	}
+	authorization := getAuthorization(r)
+	employee, err := s.EmployeeRead(ctx, authorization, empNo)
+	s.handleResponse(r.Context(), w, err,
+		&data.Response{Employee: employee})
+}
+
+func (s *service) endpointEmployeesSearch(w http.ResponseWriter, r *http.Request) {
 	var search data.EmployeeSearch
 
-	ctx := request.Context()
-	if err := request.ParseForm(); err != nil {
-		_ = handleResponse(writer, err, nil)
+	ctx := r.Context()
+	switch r.Method {
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
+	case "QUERY":
+		bytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			s.handleResponse(r.Context(), w, err, nil)
+			return
+		}
+		if err := json.Unmarshal(bytes, &search); err != nil {
+			s.handleResponse(r.Context(), w, err, nil)
+			return
+		}
+	case http.MethodGet:
+		if err := r.ParseForm(); err != nil {
+			s.handleResponse(r.Context(), w, err, nil)
+			return
+		}
+		search.FromParams(r.Form)
 	}
-	search.FromParams(request.Form)
-	employees, err := s.EmployeesSearch(ctx, getAuthorization(request), search)
-	if err := handleResponse(writer, err, &data.Response{
-		Employees: employees,
-	}); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employees_search")
-	} else {
-		s.Debug(ctx, "failed to execute employees_search", err)
-	}
+	authorization := getAuthorization(r)
+	employees, err := s.EmployeesSearch(ctx, authorization, search)
+	s.handleResponse(r.Context(), w, err, &data.Response{Employees: employees})
 }
 
-func (s *service) endpointEmployeeUpdate(writer http.ResponseWriter, request *http.Request) {
-	var employeeRequest data.Request
-
-	ctx := request.Context()
-	empNo, err := empNoFromPath(mux.Vars(request))
+func (s *service) endpointEmployeeUpdate(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	empNo, err := strconv.ParseInt(r.PathValue(data.PathEmpNo), 10, 64)
 	if err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(r.Context(), w, err, nil)
 		return
 	}
-	bytes, err := s.readRequestBody(writer, request)
-	defer request.Body.Close()
-	if err != nil {
-		_ = handleResponse(writer, err, nil)
+	request := &data.Request{}
+	if _, err := readRequestBody(r, request); err != nil {
+		s.handleResponse(r.Context(), w, err, nil)
 		return
 	}
-	if err := json.Unmarshal(bytes, &employeeRequest); err != nil {
-		_ = handleResponse(writer, err, nil)
-		return
-	}
-	employee, err := s.EmployeeUpdate(ctx, getAuthorization(request),
-		empNo, employeeRequest.EmployeePartial)
-	if err := handleResponse(writer, err, &data.Response{
-		Employee: employee,
-	}); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employee_update", slog.Int64("emp_no", employee.EmpNo))
-	} else {
-		s.Debug(ctx, "failed to execute employee_update", slog.Int64("emp_no", employee.EmpNo))
-	}
+	authorization := getAuthorization(r)
+	employee, err := s.EmployeeUpdate(ctx, authorization,
+		empNo, request.EmployeePartial)
+	s.handleResponse(r.Context(), w, err, &data.Response{Employee: employee})
 }
 
-func (s *service) endpointEmployeeDelete(writer http.ResponseWriter, request *http.Request) {
-	ctx := request.Context()
-	empNo, err := empNoFromPath(mux.Vars(request))
+func (s *service) endpointEmployeeDelete(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	empNo, err := strconv.ParseInt(r.PathValue(data.PathEmpNo), 10, 64)
 	if err != nil {
-		_ = handleResponse(writer, err, nil)
+		s.handleResponse(r.Context(), w, err, nil)
 		return
 	}
-	err = s.EmployeeDelete(ctx, getAuthorization(request), empNo)
-	if err := handleResponse(writer, err, nil); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed employee_delete", slog.Int64("emp_no", empNo))
-	} else {
-		s.Debug(ctx, "failed to execute employee_delete", err, slog.Int64("emp_no", empNo))
-	}
+	authorization := getAuthorization(r)
+	err = s.EmployeeDelete(ctx, authorization, empNo)
+	s.handleResponse(r.Context(), w, err, nil)
 }
 
-func (s *service) endpointSleep(writer http.ResponseWriter, request *http.Request) {
-	var sleepRequest data.Sleep
+func (s *service) endpointSleep(w http.ResponseWriter, r *http.Request) {
+	var request data.Sleep
 
-	ctx := request.Context()
-	bytes, err := s.readRequestBody(writer, request)
-	defer request.Body.Close()
-	if err != nil {
-		_ = handleResponse(writer, err, nil)
+	ctx := r.Context()
+	if _, err := readRequestBody(r, &request); err != nil {
+		s.handleResponse(r.Context(), w, err, nil)
 		return
 	}
-	if err := json.Unmarshal(bytes, &sleepRequest); err != nil {
-		_ = handleResponse(writer, err, nil)
-		return
-	}
-	sleep, err := s.Sleep(ctx, sleepRequest)
-	if err := handleResponse(writer, err, nil); err != nil {
-		s.Error(ctx, "unable to handle response", err)
-		return
-	}
-	if err == nil {
-		s.Debug(ctx, "successfully executed sleep", slog.String("sleep_id", sleep.Id),
-			slog.Duration("sleep_duration", time.Duration(sleep.Duration)))
-	} else {
-		s.Debug(ctx, "failed to execute sleep", err, slog.String("sleep_id", sleep.Id))
-	}
+	sleep, err := s.Sleep(ctx, request)
+	s.handleResponse(r.Context(), w, err, sleep)
 }
 
-func (s *service) endpointPanic(writer http.ResponseWriter, request *http.Request) {
-	ctx := request.Context()
+func (s *service) endpointPanic(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	s.Panic(ctx)
 }
 
-func (s *service) endpointCacheClear(writer http.ResponseWriter, request *http.Request) {
+func (s *service) endpointCacheClear(w http.ResponseWriter, r *http.Request) {
 	if s.cache != nil {
-		ctx := request.Context()
+		ctx := r.Context()
 		if err := s.cache.Clear(ctx); err != nil {
-			_ = handleResponse(writer, err, nil)
+			s.handleResponse(r.Context(), w, err, nil)
 			return
 		}
-		s.Debug(ctx, "executed cache_clear")
 	}
-	_ = handleResponse(writer, nil, nil)
+	s.handleResponse(r.Context(), w, nil, nil)
 }
 
-func (s *service) handleFunc(path string, f http.HandlerFunc, middlewares ...middleware) *mux.Route {
+func (s *service) handleFunc(path string, f http.HandlerFunc, middlewares ...middleware) {
 	if len(middlewares) <= 0 {
-		return s.Router.HandleFunc(path, f)
+		s.HandleFunc(path, f)
+		return
 	}
-	return s.Router.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+	s.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 		final := http.Handler(f)
-		for i := len(middlewares) - 1; i >= 0; i-- {
-			final = middlewares[i](final)
+		for _, middleware := range slices.Backward(middlewares) {
+			final = middleware(final)
 		}
 		final.ServeHTTP(w, r)
 	})
@@ -514,17 +429,24 @@ func (s *service) buildRoutes() {
 	//generate middleware
 	middlewares := []middleware{
 		s.middlewareInitialize(),
+		s.middlewareMaxRequestSize(),
 		s.middlewareLatency(),
 		s.middlewarePanic(),
 		s.middlewareRequest(),
-		s.middlewareSpan(),
 	}
 
 	//build routes
 	s.handleFunc("/", s.endpointDefault, middlewares...)
 	s.handleFunc(data.RouteSleep, s.endpointSleep, middlewares...)
 	s.handleFunc(data.RoutePanic, s.endpointPanic, middlewares...)
-	s.handleFunc(data.RouteEmployeesSearch, s.endpointEmployeesSearch, middlewares...)
+	s.handleFunc(data.RouteEmployeesSearch, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case http.MethodGet, "QUERY":
+			s.endpointEmployeesSearch(w, r)
+		}
+	}, middlewares...)
 	s.handleFunc(data.RouteEmployees,
 		func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
@@ -556,6 +478,14 @@ func (s *service) buildRoutes() {
 				s.endpointCacheClear(w, r)
 			}
 		}, middlewares...)
+	s.handleFunc(data.RouteAuthorize, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case http.MethodPost:
+			s.endpointAuthorize(w, r)
+		}
+	}, middlewares...)
 }
 
 func (s *service) Configure(envs map[string]string) error {
@@ -612,37 +542,42 @@ func (s *service) Configure(envs map[string]string) error {
 }
 
 func (s *service) Open(ctx context.Context) error {
-	s.Lock()
-	defer s.Unlock()
-
-	//generate endpoint counters
+	if s.opened.Load() {
+		return nil
+	}
 	meter := s.Meter(packageName)
-	s.meter = meter
-	for _, counterName := range counterNames {
-		if _, err := s.createCounter(counterName); err != nil {
-			return err
-		}
+	if err := createCounters(meter, s.Int64CounterHelper); err != nil {
+		return err
 	}
-	for _, histogramName := range histogramNames {
-		if _, err := s.createHistogram(histogramName); err != nil {
-			return err
-		}
+	if err := createUpDownCounters(meter, s.Int64UpDownCounterHelper); err != nil {
+		return err
 	}
-	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.Server.Addr = net.JoinHostPort(s.config.address, s.config.port)
+	if err := createHistograms(meter, s.Float64HistogramHelper, s.Int64HistogramHelper); err != nil {
+		return err
+	}
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.Addr = net.JoinHostPort(s.config.address, s.config.port)
 	s.buildRoutes()
-	return s.launchServer()
+	if err := s.launchServer(); err != nil {
+		return err
+	}
+	s.opened.Store(true)
+	return nil
 }
 
 func (s *service) Close(ctx context.Context) {
-	s.Lock()
-	defer s.Unlock()
-
+	if s.opened.Load() {
+		return
+	}
+	s.opened.Store(false)
 	ctx, cancel := context.WithTimeout(ctx, s.config.shutdownTimeout)
 	defer cancel()
-	if err := s.Server.Shutdown(ctx); err != nil {
+	if err := s.Shutdown(ctx); err != nil {
 		s.Error(ctx, "unable to shutdown rest service", err)
 	}
 	s.cancel()
 	s.Wait()
+	s.Float64HistogramHelper.Close(ctx)
+	s.Int64CounterHelper.Close(ctx)
+	s.Int64UpDownCounterHelper.Close(ctx)
 }
